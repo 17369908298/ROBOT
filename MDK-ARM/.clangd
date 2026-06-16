@@ -1,0 +1,9 @@
+CompileFlags:
+  Add:
+    - -ID:\ARM\ARMCLANG/include
+    - -ID:\ARM\ARMCLANG/include/libcxx
+    - -isystemD:\ARM\ARMCLANG/include
+    - -isystemD:\ARM\ARMCLANG/include/libcxx
+  Remove: []
+  CompilationDatabase: ./build/2026OmniGimbal_C_board
+  Compiler: D:\ARM\ARMCLANG\bin\armclang.exe
