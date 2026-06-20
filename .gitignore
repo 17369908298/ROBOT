@@ -1,0 +1,48 @@
+# Build outputs
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
+*.s
+*.htm
+*.lnp
+*.crf
+*.dep
+*.axf
+*.tra
+*.fed
+*.iex
+*.lin
+*.orc
+*.sct
+*.sfd
+*.bkp
+
+# Keil MDK build folders
+**/MDK-ARM/**/Listings/
+**/MDK-ARM/**/Objects/
+**/MDK-ARM/**/*.uvguix.*
+**/MDK-ARM/**/*.uvoptx
+
+# Pack and CMSIS cache
+**/MDK-ARM/.pack/
+**/MDK-ARM/.cmsis/
+
+# IDE settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Debug
+Debug/
+Release/
