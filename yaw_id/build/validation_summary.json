@@ -1,0 +1,60 @@
+{
+  "generated_utc": "2026-11-10T15:45:21.394824+00:00",
+  "target": "YawId",
+  "schema_version": 5,
+  "modified_existing_files": [
+    "MDK-ARM/Hero_gimbal.uvprojx",
+    "MDK-ARM/Hero_gimbal.uvoptx",
+    "Core/Src/freertos.c",
+    "Core/Src/main.c",
+    "Core/Src/stm32f4xx_it.c",
+    "Core/Src/retarget.c",
+    "Core/Inc/stm32f4xx_it.h",
+    "user/core/BSP/Motor/Dji/DjiMotor.hpp",
+    "user/core/BSP/Motor/DM/DmMotor.hpp",
+    "user/core/BSP/IMU/HI12Base.hpp",
+    "Core/Inc/FreeRTOSConfig.h",
+    "user/core/HAL/CAN/impl/can_device_impl.cpp",
+    "user/core/BSP/RemoteControl/DT7.hpp",
+    "user/core/BSP/RemoteControl/DT7.cpp"
+  ],
+  "new_sources_and_tools": [
+    "app/omni_reference_config.hpp",
+    "app/yaw_id.sct",
+    "app/yaw_id_app.cpp",
+    "app/yaw_id_app.h",
+    "app/yaw_id_config.hpp",
+    "app/yaw_id_core.hpp",
+    "tools/build.py",
+    "tools/decode_yaw.py",
+    "tools/identify_yaw_6020.m",
+    "tools/run_host_tests.py",
+    "tests/make_fit_fixture.py",
+    "tests/test_core.cpp",
+    "tests/test_decode.py",
+    "tests/test_fit.m"
+  ],
+  "artifact_sha256": {
+    "MDK-ARM/YawId/yaw_id.axf": "7c9d4e4df7ca930db3711c87ff4a143bf1c6b02e03a6d2f20139e5086e361267",
+    "MDK-ARM/YawId/yaw_id.bin": "253e27d348bf558e66f88d07b398b90674c5c6b4cecaca6369edb06b928dbb59",
+    "MDK-ARM/YawId/yaw_id.hex": "d399223f86848afa37a1322ccf4e9fbfdc93b0c781162c23c1163bf5496f2856"
+  },
+  "validation": [
+    "Arm Compiler 6.21 compile and link passed",
+    "8 Python offline decoder regressions passed; live serial CLI rejected",
+    "MSVC status-frame validity, IMU telemetry and controller regression passed",
+    "MATLAB direct VOFA channel mapping and legacy/synthetic fits passed"
+  ],
+  "hardware_flashed": false,
+  "hardware_run": false,
+  "vofa_channels": 10,
+  "vofa_baud": 115200,
+  "telemetry_hz": 200,
+  "serial_frame_bytes": 44,
+  "angle_source": "HI12 IMU yaw angle, rad",
+  "speed_source": "HI12 IMU yaw gyro, rad/s",
+  "imu_timestamp": "IMU complete-frame receive time estimate, seconds relative to experiment start",
+  "python_serial_capture_removed": true,
+  "acquisition": "VOFA directly opens the UART; Python decoder is offline-only",
+  "vofa_status_timeout_ms": 20
+}

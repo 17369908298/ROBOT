@@ -1,0 +1,161 @@
+D:\RMCODE\SENTRY\yaw_id\MDK-ARM\startup_stm32f427xx.s
+Warning: A1950W: The legacy armasm assembler is deprecated. Consider using the armclang integrated assembler instead.
+0 Errors, 1 Warning
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\main.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\gpio.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\freertos.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\can.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\dma.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\tim.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\usart.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\stm32f4xx_it.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\stm32f4xx_hal_msp.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\stm32f4xx_hal_timebase_tim.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\retarget.c
+
+D:\RMCODE\SENTRY\yaw_id\USB_DEVICE\App\usb_device.c
+
+D:\RMCODE\SENTRY\yaw_id\USB_DEVICE\App\usbd_desc.c
+
+D:\RMCODE\SENTRY\yaw_id\USB_DEVICE\App\usbd_cdc_if.c
+
+D:\RMCODE\SENTRY\yaw_id\USB_DEVICE\Target\usbd_conf.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_tim.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_tim_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_pcd.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_pcd_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_ll_usb.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_rcc.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_rcc_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_flash.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_flash_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_flash_ramfunc.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_gpio.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_dma_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_dma.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_pwr.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_pwr_ex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_cortex.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_exti.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_can.c
+
+D:\RMCODE\SENTRY\yaw_id\Drivers\STM32F4xx_HAL_Driver\Src\stm32f4xx_hal_uart.c
+
+D:\RMCODE\SENTRY\yaw_id\Core\Src\system_stm32f4xx.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\croutine.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\event_groups.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\list.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\queue.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\stream_buffer.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\tasks.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\timers.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\CMSIS_RTOS_V2\cmsis_os2.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\portable\MemMang\heap_4.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\Third_Party\FreeRTOS\Source\portable\RVDS\ARM_CM4F\port.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_core.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_ctlreq.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\ST\STM32_USB_Device_Library\Core\Src\usbd_ioreq.c
+
+D:\RMCODE\SENTRY\yaw_id\Middlewares\ST\STM32_USB_Device_Library\Class\CDC\Src\usbd_cdc.c
+
+D:\RMCODE\SENTRY\yaw_id\user\core\BSP\Common\StateWatch\state_watch.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\BSP\RemoteControl\DT7.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\interface\can_bus.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\interface\can_device.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\impl\can_bus_impl.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\impl\can_device_impl.cpp
+In file included from D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\impl\can_device_impl.cpp:1:
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\CAN\impl/can_device_impl.hpp:49:14: warning: private field 'mailbox_' is not used [-Wunused-private-field]
+   49 |     uint32_t mailbox_;
+      |              ^
+1 warning generated.
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\interface\uart_bus.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl\uart_bus_impl.cpp
+
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl\uart_device_impl.cpp
+In file included from D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl\uart_device_impl.cpp:1:
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl/uart_device_impl.hpp:54:10: warning: private field 'is_receiving_' is not used [-Wunused-private-field]
+   54 |     bool is_receiving_;
+      |          ^
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl/uart_device_impl.hpp:56:10: warning: private field 'is_dma_tx_ongoing_' is not used [-Wunused-private-field]
+   56 |     bool is_dma_tx_ongoing_;
+      |          ^
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl/uart_device_impl.hpp:57:10: warning: private field 'is_dma_rx_ongoing_' is not used [-Wunused-private-field]
+   57 |     bool is_dma_rx_ongoing_;
+      |          ^
+D:\RMCODE\SENTRY\yaw_id\user\core\HAL\UART\impl/uart_device_impl.hpp:59:10: warning: private field 'is_idle_enabled_' is not used [-Wunused-private-field]
+   59 |     bool is_idle_enabled_;
+      |          ^
+4 warnings generated.
+
+D:\RMCODE\SENTRY\yaw_id\app\yaw_id_app.cpp
+In file included from D:\RMCODE\SENTRY\yaw_id\app\yaw_id_app.cpp:10:
+D:\RMCODE\SENTRY\yaw_id\user/core/BSP/Motor/DM/DmMotor.hpp:111:55: warning: field 'fdcan_device_id_' will be initialized after field 'unsigned_output_encoder_' [-Wreorder-ctor]
+  111 |             : init_address(Init_id), params_(params), fdcan_device_id_(fdcan_device_id), unsigned_output_encoder_(unsigned_output_encoder)
+      |                                      ~~~~~~~~~~~~~~~  ^~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+      |                                      unsigned_output_encoder_(unsigned_output_encoder params_(params) fdcan_device_id_(fdcan_device_id
+D:\RMCODE\SENTRY\yaw_id\user/core/BSP/Motor/DM/DmMotor.hpp:424:10: note: in instantiation of member function 'BSP::Motor::DM::DMMotorBase<'\x01'>::DMMotorBase' requested here
+  424 |         :DMMotorBase<N>(base,rx,tx,Parameters(-3.14159265358979323846f,3.14159265358979323846f,-30,30,-12.5f,12.5f,0,500,0,5),bus,true){}
+      |          ^
+D:\RMCODE\SENTRY\yaw_id\app\yaw_id_app.cpp:34:30: note: in instantiation of member function 'BSP::Motor::DM::J4310_2EC<'\x01'>::J4310_2EC' requested here
+   34 | BSP::Motor::DM::J4310_2EC<1> roll_driver(0,{std::uint8_t(Config::roll_rx_id)},{Config::roll_tx_id},Bus::HAL_Can1);
+      |                              ^
+In file included from D:\RMCODE\SENTRY\yaw_id\app\yaw_id_app.cpp:10:
+D:\RMCODE\SENTRY\yaw_id\user/core/BSP/Motor/DM/DmMotor.hpp:170:100: warning: comparison of integers of different signs: 'const ID_t' (aka 'const unsigned int') and 'int' [-Wsign-compare]
+  170 |                 if (frame.dlc == 8U && !frame.is_extended_id && !frame.is_remote_frame && frame.id == init_address + recv_idxs_[i])
+      |                                                                                           ~~~~~~~~ ^  ~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+D:\RMCODE\SENTRY\yaw_id\app\yaw_id_app.cpp:195:21: note: in instantiation of member function 'BSP::Motor::DM::DMMotorBase<'\x01'>::Parse' requested here
+  195 |         roll_driver.Parse(frame);sensors.roll=read_motor(roll_driver,sensors.roll,time);
+      |                     ^
+2 warnings generated.

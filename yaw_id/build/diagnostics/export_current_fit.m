@@ -1,0 +1,13 @@
+root=fileparts(fileparts(fileparts(mfilename('fullpath'))));
+addpath(fullfile(root,'tools'));
+r=identify_yaw_6020('C:/Users/wuhailin/Desktop/yaw66666.csv',VerifyCRC=false,Plot=false);
+T=readtable('C:/Users/wuhailin/Desktop/yaw66666.csv',VariableNamingRule='preserve');
+d=double(T{:,:}); active=find(d(:,5)>0);
+idx=active(d(active,1)>=d(active(1),1)+3 & d(active,1)<=d(active(end),1)-3);
+assert(all(bitand(uint32(d(idx,6)),uint32(1+4+8+16+512+1024+8192+16384))==0));
+tau=movmean(d(idx,2),5); tau=tau(6:end-5);
+idx=idx(6:end-5); assert(numel(idx)==r.samples);
+assert(max(abs(d(idx,2)-r.raw_torque))<1e-12);
+assert(abs(sqrt(mean((tau-r.prediction).^2))-r.RMSE)<1e-12);
+samples=[d(idx,1),d(idx,8),r.phi(:,1:2),tau,d(idx,3),d(idx,6)];
+save(fullfile(root,'build','diagnostics','current_fit.mat'),'r','d','samples','-v7');
