@@ -9,23 +9,24 @@
 
 namespace BSP::Motor
 {
-    template <uint8_t N> class MotorBase
+    // 默认保持双精度；需要单精度存储和运算的驱动可显式选择 float。
+    template <uint8_t N, typename ValueType = double> class MotorBase
     {
     protected:
         struct UnitData
         {
-            double angle_Deg; // 单位度角度
-            double angle_Rad; // 单位弧度角度
+            ValueType angle_Deg; // 单位度角度
+            ValueType angle_Rad; // 单位弧度角度
 
-            double velocity_Rad; // 单位弧度速度
-            double velocity_Rpm; // 单位rpm
+            ValueType velocity_Rad; // 单位弧度速度
+            ValueType velocity_Rpm; // 单位rpm
 
-            double current_A;     // 单位安培
-            double torque_Nm;     // 单位牛米
-            double temperature_C; // 单位摄氏度
+            ValueType current_A;     // 单位安培
+            ValueType torque_Nm;     // 单位牛米
+            ValueType temperature_C; // 单位摄氏度
 
-            double last_angle;  // 上一次位置
-            double add_angle;   // 增量位置
+            ValueType last_angle;  // 上一次位置
+            ValueType add_angle;   // 增量位置
         };
 
         // 国际单位数据
@@ -143,7 +144,8 @@ namespace BSP::Motor
         float getAddAngleRad(uint8_t id)
         {
             // 内部累计值以度保存；仅在读取时转为 rad，保留多圈累计量。
-            return this->unit_data_[id - 1].add_angle * (3.14159265358979323846 / 180.0);
+            return this->unit_data_[id - 1].add_angle *
+                   static_cast<ValueType>(3.14159265358979323846 / 180.0);
         }
 
         /**

@@ -2341,9 +2341,10 @@ unsigned GimbalCtrl::GetVofaData(float *out, bool full) const
                               yaw_.loop.ref_radps,
                               yaw_.loop.speed_radps,
                               v.pitch_angle_rad,
-                              wrap_angle_rad(pitch_fb)};
-        std::copy(data, data + 8, out);
-        return 8;
+                              wrap_angle_rad(pitch_fb),
+                              float(v.control_mode)}; // CH8：视觉下行原始控制标志（0/1/2）。
+        std::copy(data, data + 9, out);
+        return 9;
     }
     const float data[] = {
         v.yaw_angle_rad,

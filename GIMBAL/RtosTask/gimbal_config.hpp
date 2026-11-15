@@ -87,10 +87,10 @@ struct GimbalConfig
         // yaw 自动控制模型、前馈、扰动观测和转矩平滑参数。
         struct Auto
         {
-            float j_kg_m2{0.011706f};
+            float j_kg_m2{0.012706f};
             float b_nms_rad{0.00749f};
-            float k_theta{7.20298f};
-            float k_omega{0.582f};
+            float k_theta{7.70298f};
+            float k_omega{0.652f};
             float k_i{2.5f};
             float theta_integral_limit_rad_s{5.0f};
             float ff_gain{0.8f};
@@ -193,7 +193,7 @@ struct GimbalConfig
         // pitch 角度环 PID，输出为参考角速度 rad/s。
         struct AnglePid
         {
-            float kp{22.0f};
+            float kp{23.0f};
             float ki{2.0f};
             float kd{0.0f};
             float output_max_radps{26.179938780f};
@@ -218,106 +218,73 @@ struct GimbalConfig
         // 手动与视觉模式切换后的等待时间。
         struct Mode
         {
-            // 手动/视觉模式切换后的死区时间，单位：毫秒。
             std::uint32_t switch_deadtime_ms{80U};
         } mode{};
 
         // 视觉模式底盘跟随限幅及运动趋势估计参数。
         struct Base
         {
-            // 底盘跟随角速度上限，单位：rad/s。
             float speed_limit_radps{3.0f};
-            // 底盘跟随角加速度上限，单位：rad/s²。
             float accel_limit_radps2{10.0f};
-            // 底盘跟随角加加速度（jerk）上限，单位：rad/s³。
             float jerk_limit_radps3{100.0f};
 
-            // 目标居中保持的增益、运动补偿和积分抑制参数。
-            struct Hold
+        // 目标居中保持的增益、运动补偿和积分抑制参数。
+        struct Hold
             {
-                // 目标中心误差到保持角速度的比例增益，单位：(rad/s)/rad。
                 float kp_radps_per_rad{5.0f};
-                // 居中保持角速度上限，单位：rad/s。
                 float speed_limit_radps{3.0f};
-                // 居中保持角加速度上限，单位：rad/s²。
                 float accel_limit_radps2{15.0f};
-                // 运动趋势低通滤波截止频率，单位：Hz。
                 float motion_trend_cutoff_hz{0.5f};
-                // 启用运动补偿的底盘速度起始阈值，单位：rad/s。
                 float motion_speed_start_radps{0.08f};
-                // 运动补偿达到满权重的底盘速度，单位：rad/s。
                 float motion_speed_full_radps{0.40f};
-                // 运动补偿权重上升时间，单位：秒。
                 float motion_rise_time_sec{0.03f};
-                // 运动补偿权重释放时间，单位：秒。
                 float motion_release_time_sec{0.20f};
-                // 保持锚点跟随目标中心变化的时间常数，单位：秒。
                 float anchor_follow_time_sec{0.02f};
-                // 目标中心滤波时间常数，单位：秒。
                 float center_filter_time_sec{0.50f};
-                // 积分增益，单位：(rad/s)/(rad·s)。
                 float ki_radps_per_rad_sec{0.25f};
-                // 积分项输出限幅，单位：rad/s。
                 float integral_limit_radps{0.25f};
-                // 积分项释放时间，单位：秒。
                 float integral_release_time_sec{0.20f};
-                // 开始抑制积分的底盘速度阈值，单位：rad/s。
                 float integral_speed_start_radps{0.03f};
-                // 积分抑制达到满权重的底盘速度，单位：rad/s。
                 float integral_speed_full_radps{0.12f};
             } hold{};
 
             // 常规底盘运动趋势估计器参数。
             struct Trend
             {
-                // 常规运动趋势估计器带宽，单位：rad/s。
                 float bandwidth_rad_s{3.0f};
-                // 常规运动趋势估计器阻尼比，无量纲。
-                float damping{1.0f};
-                // 常规运动趋势估计器的角加速度限幅，单位：rad/s²。
-                float accel_limit_radps2{8.0f};
+                float damping{2.0f};
+                float accel_limit_radps2{10.0f};
             } trend{};
 
             // 快速底盘运动趋势估计器带宽。
             struct FastTrend
             {
-                // 快速运动趋势估计器带宽，单位：rad/s。
-                float bandwidth_rad_s{3.0f};
+                float bandwidth_rad_s{4.0f};
             } fast_trend{};
         } base{};
 
         // 目标 q 轴居中、软限幅及短时预测参数。
         struct Q
         {
-            // q 轴角度偏差到居中角速度的比例增益，单位：(rad/s)/rad。
-            float centering_kp_radps_per_rad{2.5f};
-            // 软限幅开始生效的 q 轴偏差，单位：rad。
+            float centering_kp_radps_per_rad{3.0f};
             float soft_start_rad{0.35f};
-            // 软限幅达到满权重的 q 轴偏差，单位：rad。
             float soft_full_rad{0.42f};
-            // q 轴目标居中位置，单位：rad。
             float center_rad{0.0f};
-            // q 轴短时预测时长，单位：秒。
             float predict_time_sec{0.030f};
         } q{};
 
         // 目标捕获判定阈值，以及条件持续时间。
         struct Acquire
         {
-            // 目标捕获时允许的 q 轴角度误差，单位：rad。
             float q_tol_rad{0.08f};
-            // 目标捕获时允许的底盘角速度，单位：rad/s。
             float base_speed_tol_radps{0.25f};
-            // 目标捕获时允许的 yaw 轴角速度，单位：rad/s。
             float yaw_speed_tol_radps{0.30f};
-            // 满足捕获条件需持续的时间，单位：毫秒。
             std::uint32_t acquire_hold_ms{80U};
         } acquire{};
 
         // 目标丢失后保持锁定状态的宽限时间。
         struct Lock
         {
-            // 目标丢失后继续保持锁定状态的宽限时间，单位：毫秒。
             std::uint32_t grace_ms{1000U};
         } lock{};
     } vision{};
@@ -350,14 +317,14 @@ struct GimbalConfig
     struct Sentry
     {
         bool enabled{true}; // 是否启用巡逻模式。
-        float base_cruise_speed_radps{1.8f}; // 底盘巡航角速度。
+        float base_cruise_speed_radps{2.2f}; // 底盘巡航角速度。
 
         // 巡逻 yaw 正弦扫描的中心、幅值、频率和角度范围。
         struct Yaw
         {
             float center_rad{0.0f};
             float amplitude_rad{0.209439510f};
-            float frequency_hz{2.5f};
+            float frequency_hz{1.8f};
             float min_rad{-0.351799388f};
             float max_rad{0.351799388f};
 
@@ -418,8 +385,8 @@ struct GimbalConfig
         // 常规姿态与变形姿态的 roll 目标角。
         struct Reference
         {
-            float normal_rad{2.98f};
-            float transform_rad{4.869f};
+            float normal_rad{2.83f};
+            float transform_rad{4.659f};
         } reference{};
 
         // roll 阻抗控制的刚度、阻尼和变形比例。
@@ -482,7 +449,7 @@ struct GimbalConfig
             // 底盘变形角度环 PID。
             struct AnglePid
             {
-                float kp{8.0f};
+                float kp{6.0f};
                 float ki{0.0f};
                 float kd{0.0f};
                 float output_max{10.0f};
@@ -491,7 +458,7 @@ struct GimbalConfig
                 float integral_separation_rad{0.07f};
                 float integral_reset_rad{0.15f};
             } angle_pid{};
-            float mit_kd{0.9f};
+            float mit_kd{0.8f};
         } base{};
 
         // 变形时 yaw 轴角度环和速度环。

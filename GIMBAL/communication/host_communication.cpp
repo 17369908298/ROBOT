@@ -123,7 +123,7 @@ bool SendVision(uint32_t now)
     PutFloat(tx + 23, Sentry::Utils::deg_to_rad(imu.gyro_dps[2]));
     PutFloat(tx + 27, Sentry::Utils::deg_to_rad(imu.angle_deg[1]));
     PutFloat(tx + 31, Sentry::Utils::deg_to_rad(imu.gyro_dps[0]));
-    PutFloat(tx + 35, 23.0f);
+    PutFloat(tx + 35, 20.0f);
     WriteU16(tx + 41, Crc16Reflected(tx, 41, 0x8408));
     if (CDC_Transmit_FS(tx, 43) != USBD_OK)
         return false;

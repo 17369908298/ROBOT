@@ -69,9 +69,12 @@ class ChassisCtrl
     };
 
     static constexpr ALG::Omni::TimePid::Config WHEEL_PID_DEFAULT = {
-        chassis_cfg::wheel_pid_kp,         chassis_cfg::wheel_pid_ki,
-        chassis_cfg::wheel_pid_kd,         chassis_cfg::wheel_pid_output_max,
-        chassis_cfg::wheel_pid_output_min, chassis_cfg::wheel_pid_integral_max,
+        chassis_cfg::chassis.wheel.speed_pid.kp,
+        chassis_cfg::chassis.wheel.speed_pid.ki,
+        chassis_cfg::chassis.wheel.speed_pid.kd,
+        chassis_cfg::chassis.wheel.speed_pid.output_max,
+        chassis_cfg::chassis.wheel.speed_pid.output_min,
+        chassis_cfg::chassis.wheel.speed_pid.integral_max,
     };
 
     ALG::Omni::PowerControl<WHEEL_COUNT> power_control_{};
@@ -89,10 +92,10 @@ class ChassisCtrl
     ALG::Omni::SCurveVelocityPlanning planner_wz_{};
 
     float wheel_sign_[WHEEL_COUNT] = {
-        chassis_cfg::wheel_sign_fl,
-        chassis_cfg::wheel_sign_fr,
-        chassis_cfg::wheel_sign_bl,
-        chassis_cfg::wheel_sign_br,
+        chassis_cfg::chassis.wheel.sign.fl,
+        chassis_cfg::chassis.wheel.sign.fr,
+        chassis_cfg::chassis.wheel.sign.bl,
+        chassis_cfg::chassis.wheel.sign.br,
     };
 
     float ref_wheel_radps_[WHEEL_COUNT]{};

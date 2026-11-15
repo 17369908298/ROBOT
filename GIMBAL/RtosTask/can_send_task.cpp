@@ -5,13 +5,15 @@
 #include "BSP/Motor/Dji/DjiMotor.hpp"
 #include "communication/robot_data.hpp"
 #include <cmath>
+#include <cstdint>
 #include "BSP/Motor/DM/DmMotor.hpp"
 #include "BSP/Motor/LK/Lk_motor.hpp"
 #include "feeder_fsm/motor_recovery_fsm.hpp"
 
 namespace
 {
-// 云台任务每 1 ms 更新控制和电机输出。
+// 控制计算每 1 ms 更新；每条 CAN 总线分三个时隙轮流发送电机命令。
+constexpr std::uint8_t kCanSendSlotCount = 3U;
 using Bus = HAL::CAN::CanDeviceId;
 template <class Motor> Sentry::MotorFeedback ReadMotor(Motor &motor, uint8_t id, float ratio)
 {
@@ -95,16 +97,35 @@ void MotorInit()
     bus.get_can1().register_rx_callback(Can1Receive);
     bus.get_can2().register_rx_callback(Can2Receive);
 }
-void MotorSend(uint32_t now)
+void Can1Send(std::uint8_t slot)
 {
-    sentry_data.base_status.publish(base_fsm.Update(sentry_data.base_mit.read(), 2, 3));
-    sentry_data.pitch_status.publish(pitch_fsm.Update(sentry_data.pitch_mit.read(), 4, 5));
-    sentry_data.roll_status.publish(roll_fsm.Update(sentry_data.roll_mit.read(), 6, 7));
-    if ((now & 1U) == 0)
+    // DM 状态机每次 Update 最多发送一帧，清错和使能命令也占用本电机的时隙。
+    switch (slot)
+    {
+    case 0U:
+        sentry_data.base_status.publish(base_fsm.Update(sentry_data.base_mit.read(), 2, 3));
+        break;
+    case 1U:
+        sentry_data.pitch_status.publish(pitch_fsm.Update(sentry_data.pitch_mit.read(), 4, 5));
+        break;
+    case 2U:
+        sentry_data.roll_status.publish(roll_fsm.Update(sentry_data.roll_mit.read(), 6, 7));
+        break;
+    }
+}
+void Can2Send(std::uint8_t slot)
+{
+    switch (slot)
+    {
+    case 0U:
     {
         const auto yaw = sentry_data.yaw_cmd.read();
         yaw_motor.setCAN(yaw.enable ? yaw.current : 0, 2);
         yaw_motor.sendCAN();
+        break;
+    }
+    case 1U:
+    {
         const auto left = sentry_data.fric_left_cmd.read(),
                    right = sentry_data.fric_right_cmd.read(),
                    third = sentry_data.fric_third_cmd.read();
@@ -112,23 +133,37 @@ void MotorSend(uint32_t now)
         friction_motor.setCAN(right.enable ? right.current : 0, 1);
         friction_motor.setCAN(third.enable ? third.current : 0, 3);
         friction_motor.sendCAN();
+        break;
+    }
+    case 2U:
+    {
         const auto dial = sentry_data.dial_cmd.read();
         dial_motor.ctrl_Torque(1, 1, dial.enable ? dial.current : 0);
+        break;
+    }
     }
 }
 } // namespace
 extern "C" void can_send_task(void *)
 {
     MotorInit();
+    constexpr TickType_t send_period_ticks = pdMS_TO_TICKS(1);
+    static_assert(send_period_ticks > 0U, "CAN send slot must span at least one RTOS tick");
     TickType_t tick = xTaskGetTickCount();
-    // 1 ms 周期发送电机命令；GM6020、摩擦轮和拨盘仍按 2 ms 发送。
+    std::uint8_t send_slot = 0U;
+    // 每 1 ms 各总线提交一帧；三组帧错相轮询，每组标称周期为 3 ms。
     for (;;)
     {
-        const uint32_t now = HAL_GetTick();
-        MotorSend(now);
+        Can1Send(send_slot);
+        Can2Send(send_slot);
+        if (++send_slot >= kCanSendSlotCount)
+            send_slot = 0U;
 
-        
-        vTaskDelayUntil(&tick, pdMS_TO_TICKS(1));
+        // 任务超期时跳过追赶补发，避免多组帧在同一 tick 内集中提交。
+        const TickType_t current_tick = xTaskGetTickCount();
+        if (static_cast<TickType_t>(current_tick - tick) >= send_period_ticks)
+            tick = current_tick;
+        vTaskDelayUntil(&tick, send_period_ticks);
     }
 }
 

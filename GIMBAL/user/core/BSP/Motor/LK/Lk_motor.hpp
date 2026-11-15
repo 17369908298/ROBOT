@@ -11,34 +11,34 @@ namespace BSP::Motor::LK
    // 参数结构体定义
    struct Parameters
    {
-       double reduction_ratio;      // 减速比
-       double torque_constant;      // 力矩常数 (Nm/A)
-       double feedback_current_max; // 反馈最大电流 (A)
-       double current_max;          // 最大电流 (A)
-       double encoder_resolution;   // 编码器分辨率
+       float reduction_ratio;      // 减速比
+       float torque_constant;      // 力矩常数 (Nm/A)
+       float feedback_current_max; // 反馈最大电流 (A)
+       float current_max;          // 最大电流 (A)
+       float encoder_resolution;   // 编码器分辨率
 
        // 自动计算的参数
-       double encoder_to_deg; // 编码器值转角度系数
-       double encoder_to_rpm;
-       double rpm_to_radps;                    // RPM转角速度系数
-       double current_to_torque_coefficient;   // 电流转扭矩系数   
-       double feedback_to_current_coefficient; // 反馈电流转电流系数
-       double deg_to_real;                     // 角度转实际角度系数
+       float encoder_to_deg; // 编码器值转角度系数
+       float speed_dps_to_rpm;                // 协议速度为转子轴 deg/s，换算到输出轴 rpm
+       float speed_dps_to_radps;              // 协议速度换算到输出轴 rad/s
+       float current_to_torque_coefficient;   // 电流转扭矩系数   
+       float feedback_to_current_coefficient; // 反馈电流转电流系数
+       float deg_to_real;                     // 角度转实际角度系数
 
-       static constexpr double deg_to_rad = 0.017453292519611;
-       static constexpr double rad_to_deg = 1 / 0.017453292519611;
+       static constexpr float deg_to_rad = 0.017453292519611f;
+       static constexpr float rad_to_deg = 1.0f / deg_to_rad;
 
        // 构造函数带参数计算
-       Parameters(double rr, double tc, double fmc, double mc, double er)
+       Parameters(float rr, float tc, float fmc, float mc, float er)
            : reduction_ratio(rr), torque_constant(tc), feedback_current_max(fmc), 
              current_max(mc), encoder_resolution(er)
        {
-           encoder_to_deg = 360.0 / encoder_resolution;
-           rpm_to_radps = 1 / reduction_ratio / 60 * 2 * 3.14159265358979323846;
-           encoder_to_rpm = 1 / reduction_ratio;
+           encoder_to_deg = 360.0f / encoder_resolution;
+           speed_dps_to_rpm = 1.0f / (6.0f * reduction_ratio);
+           speed_dps_to_radps = deg_to_rad / reduction_ratio;
            current_to_torque_coefficient = reduction_ratio * torque_constant / feedback_current_max * current_max;
            feedback_to_current_coefficient = current_max / feedback_current_max;
-           deg_to_real = 1 / reduction_ratio;
+           deg_to_real = 1.0f / reduction_ratio;
        }
    };
 
@@ -46,7 +46,7 @@ namespace BSP::Motor::LK
     * @brief LK电机基类
     */
    template <uint8_t N> 
-   class LkMotorBase : public MotorBase<N>
+   class LkMotorBase : public MotorBase<N, float>
    {
    protected:
        struct alignas(uint64_t) LkMotorFeedback
@@ -60,8 +60,8 @@ namespace BSP::Motor::LK
 
        struct MultiAngleData
        {
-           double total_angle;
-           double last_angle;
+           float total_angle;
+           float last_angle;
            bool allow_accumulate;
            bool is_initialized;
        };
@@ -77,8 +77,8 @@ namespace BSP::Motor::LK
                 recv_idxs_[i] = recv_ids[i];
                 send_idxs_[i] = send_ids[i];
                 // 初始化多圈角度数据
-                multi_angle_data_[i].total_angle = 0.0;
-                multi_angle_data_[i].last_angle = 0.0;
+                multi_angle_data_[i].total_angle = 0.0f;
+                multi_angle_data_[i].last_angle = 0.0f;
                 multi_angle_data_[i].allow_accumulate = false;
                 multi_angle_data_[i].is_initialized = false;
             }
@@ -89,10 +89,11 @@ namespace BSP::Motor::LK
         {
             const auto &params = params_;
 
-            this->unit_data_[i].angle_Deg = feedback_[i].angle * params.encoder_to_deg;
-            this->unit_data_[i].angle_Rad = this->unit_data_[i].angle_Deg * params.deg_to_rad;
-            this->unit_data_[i].velocity_Rad = feedback_[i].velocity * params.rpm_to_radps;
-            this->unit_data_[i].velocity_Rpm = feedback_[i].velocity * params.encoder_to_rpm;
+            const float angle_deg = feedback_[i].angle * params.encoder_to_deg;
+            this->unit_data_[i].angle_Deg = angle_deg;
+            this->unit_data_[i].angle_Rad = angle_deg * params.deg_to_rad;
+            this->unit_data_[i].velocity_Rad = feedback_[i].velocity * params.speed_dps_to_radps;
+            this->unit_data_[i].velocity_Rpm = feedback_[i].velocity * params.speed_dps_to_rpm;
             this->unit_data_[i].current_A = feedback_[i].current * params.feedback_to_current_coefficient;
             this->unit_data_[i].torque_Nm = feedback_[i].current * params.current_to_torque_coefficient;
             this->unit_data_[i].temperature_C = feedback_[i].temperature;
@@ -102,27 +103,27 @@ namespace BSP::Motor::LK
             {
                 if (!multi_angle_data_[i].is_initialized)
                 {
-                    multi_angle_data_[i].last_angle = this->unit_data_[i].angle_Deg;
+                    multi_angle_data_[i].last_angle = angle_deg;
                     multi_angle_data_[i].is_initialized = true;
                 }
                 else
                 {
-                    double last_angle = multi_angle_data_[i].last_angle;
-                    double delta = this->unit_data_[i].angle_Deg - last_angle;
+                    const float last_angle = multi_angle_data_[i].last_angle;
+                    float delta = angle_deg - last_angle;
                     
                     // 处理360°跳变
-                    if (delta > 180.0) 
-                        delta -= 360.0;
-                    else if (delta < -180.0) 
-                        delta += 360.0;
+                    if (delta > 180.0f) 
+                        delta -= 360.0f;
+                    else if (delta < -180.0f) 
+                        delta += 360.0f;
                     
                     multi_angle_data_[i].total_angle += delta;
                     this->unit_data_[i].add_angle = delta;
                 }
             }
             
-            multi_angle_data_[i].last_angle = this->unit_data_[i].angle_Deg;
-            this->unit_data_[i].last_angle = this->unit_data_[i].angle_Deg;
+            multi_angle_data_[i].last_angle = angle_deg;
+            this->unit_data_[i].last_angle = angle_deg;
         }
 
         HAL::CAN::Frame msd{};
@@ -133,9 +134,16 @@ namespace BSP::Motor::LK
             */
         void Parse(const HAL::CAN::Frame &frame) override
         {
+            if (frame.dlc != 8U || frame.is_extended_id || frame.is_remote_frame)
+                return;
+            // 只有状态 2 和运动控制回包包含电流、速度及编码器位置。
+            // 使能、停止、清错等应答不能更新运动反馈和多圈角度。
+            const uint8_t command = frame.data[0];
+            if (command != 0x9CU && (command < 0xA1U || command > 0xA8U))
+                return;
             for (uint8_t i = 0; i < N; ++i)
             {
-                if (frame.dlc == 8U && !frame.is_extended_id && !frame.is_remote_frame && frame.id == init_address + recv_idxs_[i])
+                if (frame.id == static_cast<uint32_t>(init_address) + recv_idxs_[i])
                 {
                     const uint8_t* pData = frame.data;
                         
@@ -159,7 +167,9 @@ namespace BSP::Motor::LK
          */
         void sendCAN(uint8_t id)
         {
-            HAL::CAN::Frame frame;
+            if (id < 1U || id > N)
+                return;
+            HAL::CAN::Frame frame{};
             frame.id = init_address + send_idxs_[id - 1];
             frame.dlc = 8;
             memcpy(frame.data, msd.data, 8);
@@ -295,11 +305,11 @@ namespace BSP::Motor::LK
    public:
        LK4005(uint16_t Init_id, const uint8_t (&ids)[N], const uint32_t (&send_idxs)[N])
            : LkMotorBase<N>(Init_id, ids, send_idxs,
-                           Parameters(10.0,     // 减速比
-                                    0.06,      // 扭矩常数
-                                    4096,      // 最大反馈电流
-                                    2.7,       // 最大电流 
-                                    65536.0))  // 编码器分辨率
+                           Parameters(10.0f,     // 减速比
+                                    0.06f,      // 扭矩常数
+                                    4096.0f,    // 最大反馈电流
+                                    2.7f,       // 最大电流 
+                                    65536.0f))  // 编码器分辨率
        {
        }
    };

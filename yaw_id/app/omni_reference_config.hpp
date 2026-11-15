@@ -218,70 +218,47 @@ struct GimbalConfig
         // 手动与视觉模式切换后的等待时间。
         struct Mode
         {
-            // 手动/视觉模式切换后的死区时间，单位：毫秒。
             std::uint32_t switch_deadtime_ms{80U};
         } mode{};
 
         // 视觉模式底盘跟随限幅及运动趋势估计参数。
         struct Base
         {
-            // 底盘跟随角速度上限，单位：rad/s。
             float speed_limit_radps{3.0f};
-            // 底盘跟随角加速度上限，单位：rad/s²。
             float accel_limit_radps2{10.0f};
-            // 底盘跟随角加加速度（jerk）上限，单位：rad/s³。
             float jerk_limit_radps3{100.0f};
 
-            // 目标居中保持的增益、运动补偿和积分抑制参数。
-            struct Hold
+        // 目标居中保持的增益、运动补偿和积分抑制参数。
+        struct Hold
             {
-                // 目标中心误差到保持角速度的比例增益，单位：(rad/s)/rad。
                 float kp_radps_per_rad{5.0f};
-                // 居中保持角速度上限，单位：rad/s。
                 float speed_limit_radps{2.0f};
-                // 居中保持角加速度上限，单位：rad/s²。
                 float accel_limit_radps2{15.0f};
-                // 运动趋势低通滤波截止频率，单位：Hz。
                 float motion_trend_cutoff_hz{0.5f};
-                // 启用运动补偿的底盘速度起始阈值，单位：rad/s。
                 float motion_speed_start_radps{0.08f};
-                // 运动补偿达到满权重的底盘速度，单位：rad/s。
                 float motion_speed_full_radps{0.40f};
-                // 运动补偿权重上升时间，单位：秒。
                 float motion_rise_time_sec{0.03f};
-                // 运动补偿权重释放时间，单位：秒。
                 float motion_release_time_sec{0.20f};
-                // 保持锚点跟随目标中心变化的时间常数，单位：秒。
                 float anchor_follow_time_sec{0.02f};
-                // 目标中心滤波时间常数，单位：秒。
                 float center_filter_time_sec{0.50f};
-                // 积分增益，单位：(rad/s)/(rad·s)。
                 float ki_radps_per_rad_sec{0.25f};
-                // 积分项输出限幅，单位：rad/s。
                 float integral_limit_radps{0.25f};
-                // 积分项释放时间，单位：秒。
                 float integral_release_time_sec{0.20f};
-                // 开始抑制积分的底盘速度阈值，单位：rad/s。
                 float integral_speed_start_radps{0.03f};
-                // 积分抑制达到满权重的底盘速度，单位：rad/s。
                 float integral_speed_full_radps{0.12f};
             } hold{};
 
             // 常规底盘运动趋势估计器参数。
             struct Trend
             {
-                // 常规运动趋势估计器带宽，单位：rad/s。
                 float bandwidth_rad_s{3.0f};
-                // 常规运动趋势估计器阻尼比，无量纲。
                 float damping{1.0f};
-                // 常规运动趋势估计器的角加速度限幅，单位：rad/s²。
                 float accel_limit_radps2{8.0f};
             } trend{};
 
             // 快速底盘运动趋势估计器带宽。
             struct FastTrend
             {
-                // 快速运动趋势估计器带宽，单位：rad/s。
                 float bandwidth_rad_s{3.0f};
             } fast_trend{};
         } base{};
@@ -289,35 +266,25 @@ struct GimbalConfig
         // 目标 q 轴居中、软限幅及短时预测参数。
         struct Q
         {
-            // q 轴角度偏差到居中角速度的比例增益，单位：(rad/s)/rad。
             float centering_kp_radps_per_rad{2.5f};
-            // 软限幅开始生效的 q 轴偏差，单位：rad。
             float soft_start_rad{0.35f};
-            // 软限幅达到满权重的 q 轴偏差，单位：rad。
             float soft_full_rad{0.42f};
-            // q 轴目标居中位置，单位：rad。
             float center_rad{0.0f};
-            // q 轴短时预测时长，单位：秒。
             float predict_time_sec{0.030f};
         } q{};
 
         // 目标捕获判定阈值，以及条件持续时间。
         struct Acquire
         {
-            // 目标捕获时允许的 q 轴角度误差，单位：rad。
             float q_tol_rad{0.08f};
-            // 目标捕获时允许的底盘角速度，单位：rad/s。
             float base_speed_tol_radps{0.25f};
-            // 目标捕获时允许的 yaw 轴角速度，单位：rad/s。
             float yaw_speed_tol_radps{0.30f};
-            // 满足捕获条件需持续的时间，单位：毫秒。
             std::uint32_t acquire_hold_ms{80U};
         } acquire{};
 
         // 目标丢失后保持锁定状态的宽限时间。
         struct Lock
         {
-            // 目标丢失后继续保持锁定状态的宽限时间，单位：毫秒。
             std::uint32_t grace_ms{1000U};
         } lock{};
     } vision{};
