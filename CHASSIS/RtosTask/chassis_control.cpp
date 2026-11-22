@@ -1,75 +1,139 @@
-#include "communication/robot_data.hpp"
-#include "RtosTask/chassis_control.hpp"
+#include "chassis_control.hpp"
+#include "chassis_kinematics_config.hpp"
+#include "user/core/Alg/Omni/chassis_ff.hpp"
 #include "user/core/Alg/Omni/control_math.hpp"
-#include <cstddef>
 #include <cmath>
-#include "RtosTask/robot_config.hpp"
 
-namespace
+/**
+ * @brief 构造底盘运动学求解器和逆动力学模型。
+ */
+ChassisCtrl::ChassisCtrl()
+    : kinematics_(App::Chassis::make_kinematics_config()), dynamics_(make_dynamics())
 {
-
-constexpr std::size_t DT7_CH_S1 = 4U;
-constexpr std::size_t DT7_CH_S2 = 7U;
-
-std::uint8_t dt7_switch(const Sentry::RemoteData &remote, std::size_t index)
-{
-    if (remote.timestamp == 0U)
-        return 0U;
-    if (index == DT7_CH_S1)
-        return remote.s1;
-    if (index == DT7_CH_S2)
-        return remote.s2;
-    return 0U;
 }
 
-bool dt7_connected(const Sentry::RemoteData &remote, std::uint32_t timeout_ms)
+/**
+ * @brief 绑定四轮反馈与指令，配置功率限制、轮速 PID 和前馈速度规划。
+ * @return 初始化成功返回 true，已启用的功率限制配置无效时返回 false。
+ */
+bool ChassisCtrl::Init()
 {
-    return remote.timestamp != 0U && Sentry::Time::fresh(remote.timestamp, timeout_ms);
+    if (chassis_cfg::chassis.power.enabled && !power_control_config_valid())
+    {
+        return false;
+    }
+    ALG::Omni::PowerControlStrategy::RefereeConfig power_config{};
+    power_config.fallback_w = chassis_cfg::chassis.power.fallback_w;
+    power_config.margin_w = chassis_cfg::chassis.power.margin_w;
+    power_config.timeout_ms = chassis_cfg::chassis.power.referee_timeout_ms;
+    power_config.buffer_low_j = chassis_cfg::chassis.power.buffer_low_j;
+    power_config.buffer_recover_j = chassis_cfg::chassis.power.buffer_recover_j;
+    power_config.low_buffer_scale = chassis_cfg::chassis.power.low_buffer_scale;
+    if (!power_strategy_.ConfigureReferee(power_config) && chassis_cfg::chassis.power.enabled)
+    {
+        return false;
+    }
+    power_control_.configure({chassis_cfg::chassis.power.model.absolute_speed_loss, false,
+                              chassis_cfg::chassis.wheel.motor.current_max_a /
+                                  chassis_cfg::chassis.wheel.motor.command_max_raw});
+
+    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
+    {
+        wheel_[i].fb = &sentry_data.wheel_fb[i];
+        wheel_[i].cmd = &sentry_data.wheel_cmd[i];
+        wheel_[i].pid.set_config(WHEEL_PID_DEFAULT);
+    }
+
+    planner_vx_.configure(make_linear_planner_config());
+    planner_vy_.configure(make_linear_planner_config());
+    planner_wz_.configure(make_angular_planner_config());
+
+    reset_control();
+    mode_fsm_.init(OnmiChassisMode::STOP, Sentry::Time::now_ms());
+
+    return true;
 }
 
-} // namespace
-
+/**
+ * @brief 读取当前周期输入，更新底盘模式并在满足输出条件时执行四轮闭环控制。
+ */
 void ChassisCtrl::Update()
 {
-    // 读取输入快照，检查底盘模式和轮子在线状态后更新四轮输出。
-
     const auto in = readInputs();
 
     mode_fsm_.update(select_mode(in.remote), in.nowMs);
     if (mode_fsm_.changed())
     {
-
         reset_control();
     }
 
-    if (mode_fsm_.state() == OnmiChassisMode::STOP || mode_fsm_.state() == OnmiChassisMode::COUNT)
+    const auto mode = mode_fsm_.state();
+    if (mode == OnmiChassisMode::STOP || mode == OnmiChassisMode::COUNT)
     {
-        if (last_output_allowed_)
-        {
-        }
-        last_output_allowed_ = false;
         stop_all();
         return;
     }
 
-    if (!power_output_allowed_ || !system_safe_for_output(in.remote, mode_fsm_.state(), in.command))
+    if (!power_output_allowed_ || !system_safe_for_output(in.remote, mode, in.command))
     {
         reset_control();
-
-        last_output_allowed_ = false;
         stop_all();
         return;
     }
 
-    run_motion_command(mode_fsm_.state(), in.command, in.feedback);
+    run_motion_command(mode, in.command, in.feedback);
 }
 
-void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
-                                     const App::Chassis::ChassisMotionCommand &command,
-                                     const Sentry::MotorFeedback (&feedback)[WHEEL_COUNT])
+/**
+ * @brief 将底盘切换到停止模式，复位控制状态并发布四轮零电流指令。
+ */
+void ChassisCtrl::Stop()
 {
-    // 将机体速度目标转换为轮速，再执行速度环、功率限制和电流发布。
+    mode_fsm_.force(OnmiChassisMode::STOP, Sentry::Time::now_ms());
+    reset_control();
+    stop_all();
+}
 
+/**
+ * @brief 读取遥控器、运动指令和四轮反馈，同时刷新功率预算及轮子离线状态。
+ * @return 本轮控制使用的时间戳、遥控数据、运动指令和轮速反馈。
+ */
+ChassisCtrl::Inputs ChassisCtrl::readInputs()
+{
+    Inputs in{};
+    in.nowMs = Sentry::Time::now_ms();
+    in.remote = sentry_data.remote.read();
+    in.command = sentry_data.motion_command.read();
+
+    update_power_budget(in.nowMs);
+
+    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
+    {
+        in.feedback[i] = wheel_[i].fb->read();
+        wheel_[i].fb_online = in.feedback[i].timestamp != 0U &&
+                              in.feedback[i].is_online(chassis_cfg::chassis.timeouts.motor_fb_soft_ms);
+
+        const bool was_offline = wheel_[i].offline;
+        wheel_[i].offline = feedback_hard_offline(in.feedback[i], in.nowMs);
+        if (wheel_[i].offline != was_offline)
+        {
+            reset_wheel_control(i);
+        }
+    }
+
+    return in;
+}
+
+/**
+ * @brief 处理机体速度目标，依次计算轮速目标、力矩前馈和四轮电流。
+ * @param mode 当前底盘控制模式。
+ * @param command 本周期的线速度及角速度指令。
+ * @param feedback 四轮电机反馈，按左前、右前、左后、右后排列。
+ */
+void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
+                                    const App::Chassis::ChassisMotionCommand &command,
+                                    const Sentry::MotorFeedback (&feedback)[WHEEL_COUNT])
+{
     float vx = Sentry::Utils::clamp(command.vx_mps, -chassis_cfg::chassis.limits.max_planar_speed_mps,
                                     chassis_cfg::chassis.limits.max_planar_speed_mps);
     float vy = Sentry::Utils::clamp(command.vy_mps, -chassis_cfg::chassis.limits.max_planar_speed_mps,
@@ -82,52 +146,71 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
         command.source == App::Chassis::ChassisMotionSource::Manual &&
         chassis_cfg::chassis.limits.max_planar_speed_mps > 0.0f)
     {
-        const App::Chassis::GimbalYawJointFeedback yaw =
-            true ? sentry_data.yaw_joint.read() : App::Chassis::GimbalYawJointFeedback{};
-        float actual_vx = 0.0f;
-        float actual_vy = 0.0f;
-        float actual_wz = 0.0f;
-        {
-            const App::Chassis::ChassisOdometry odometry = sentry_data.odometry.read();
-            if (odometry.is_online(chassis_cfg::chassis.manual.odometry_timeout_ms) &&
-                std::isfinite(odometry.vx_body_mps) && std::isfinite(odometry.vy_body_mps) &&
-                std::isfinite(odometry.wz_radps))
-            {
-                actual_vx = odometry.vx_body_mps;
-                actual_vy = odometry.vy_body_mps;
-                actual_wz = odometry.wz_radps;
-            }
-        }
-
-        const bool yaw_valid = yaw.is_online(chassis_cfg::chassis.manual.gimbal_yaw_timeout_ms) &&
-                               std::isfinite(yaw.yaw_angle_rad);
-        const float yaw_angle =
-            yaw_valid ? yaw.yaw_angle_rad : chassis_cfg::chassis.manual.gimbal_yaw_zero_rad;
-        const float sign = chassis_cfg::chassis.manual.gimbal_yaw_sign;
-        const float joystick_x =
-            Sentry::Utils::clamp(-vy / chassis_cfg::chassis.limits.max_planar_speed_mps, -1.0f, 1.0f);
-        const float joystick_y =
-            Sentry::Utils::clamp(vx / chassis_cfg::chassis.limits.max_planar_speed_mps, -1.0f, 1.0f);
-        Sentry::Utils::calculate_translation_xy(
-            sign * yaw_angle, joystick_x, joystick_y,
-            sign * chassis_cfg::chassis.manual.gimbal_yaw_zero_rad, chassis_cfg::chassis.limits.max_planar_speed_mps,
-            chassis_cfg::chassis.manual.gimbal_angle_comp_rad, chassis_cfg::chassis.manual.gimbal_phase_comp_rad,
-            actual_vx, actual_vy, actual_wz, &vx, &vy, chassis_cfg::chassis.manual.dynamic_k_base);
-        Sentry::Utils::normalize_planar_speed(vx, vy, chassis_cfg::chassis.limits.max_planar_speed_mps);
+        apply_manual_translation(vx, vy);
     }
 
-    ALG::Omni::WheelOutput output[WHEEL_COUNT]{};
+    float wheel_radps[WHEEL_COUNT]{};
+    calculate_wheel_targets(vx, vy, wz, wheel_radps);
+    const auto ff = calculate_feedforward(vx, vy, wz, wheel_radps);
+    run_wheel_speed_control(wheel_radps, ff, feedback);
+}
 
+/**
+ * @brief 根据云台偏航角和里程计速度对手动平移指令做坐标变换与动态补偿。
+ * @param[in,out] vx X 方向平移目标，单位为 m/s。
+ * @param[in,out] vy Y 方向平移目标，单位为 m/s。
+ */
+void ChassisCtrl::apply_manual_translation(float &vx, float &vy)
+{
+    const auto yaw = sentry_data.yaw_joint.read();
+    const auto odometry = sentry_data.odometry.read();
+    float actual_vx = 0.0f;
+    float actual_vy = 0.0f;
+    float actual_wz = 0.0f;
+    if (odometry.is_online(chassis_cfg::chassis.manual.odometry_timeout_ms) &&
+        std::isfinite(odometry.vx_body_mps) && std::isfinite(odometry.vy_body_mps) &&
+        std::isfinite(odometry.wz_radps))
+    {
+        actual_vx = odometry.vx_body_mps;
+        actual_vy = odometry.vy_body_mps;
+        actual_wz = odometry.wz_radps;
+    }
+
+    const bool yaw_valid = yaw.is_online(chassis_cfg::chassis.manual.gimbal_yaw_timeout_ms) &&
+                           std::isfinite(yaw.yaw_angle_rad);
+    const auto &manual = chassis_cfg::chassis.manual;
+    const float yaw_angle = yaw_valid ? yaw.yaw_angle_rad : manual.gimbal_yaw_zero_rad;
+    const float sign = manual.gimbal_yaw_sign;
+    const float max_speed = chassis_cfg::chassis.limits.max_planar_speed_mps;
+    const float joystick_x = Sentry::Utils::clamp(-vy / max_speed, -1.0f, 1.0f);
+    const float joystick_y = Sentry::Utils::clamp(vx / max_speed, -1.0f, 1.0f);
+    Sentry::Utils::calculate_translation_xy(
+        sign * yaw_angle, joystick_x, joystick_y, sign * manual.gimbal_yaw_zero_rad, max_speed,
+        manual.gimbal_angle_comp_rad, manual.gimbal_phase_comp_rad, actual_vx, actual_vy, actual_wz,
+        &vx, &vy, manual.dynamic_k_base);
+    Sentry::Utils::normalize_planar_speed(vx, vy, max_speed);
+}
+
+/**
+ * @brief 逆解四轮转速，将硬离线轮的目标置零，对其余车轮统一限速并同步缩放机体速度。
+ * @param[in,out] vx 底盘 X 方向速度，单位为 m/s。
+ * @param[in,out] vy 底盘 Y 方向速度，单位为 m/s。
+ * @param[in,out] wz 底盘绕 Z 轴角速度，单位为 rad/s。
+ * @param[out] wheel_radps 四轮转速目标，单位为 rad/s。
+ */
+void ChassisCtrl::calculate_wheel_targets(float &vx, float &vy, float &wz,
+                                         float (&wheel_radps)[WHEEL_COUNT])
+{
+    ALG::Omni::WheelOutput output[WHEEL_COUNT]{};
     kinematics_.inverse_kinematics(vx, vy, wz, output);
 
-    float logical_ref[WHEEL_COUNT]{};
     float max_abs_ref = 0.0f;
     for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
     {
-        const float wheel_radps =
+        const float speed_radps =
             output[i].speed_rpm * Sentry::Utils::Constants::RPM_TO_RAD_PER_SEC;
-        logical_ref[i] = wheel_[i].offline ? 0.0f : wheel_radps;
-        max_abs_ref = std::fmax(max_abs_ref, std::fabs(logical_ref[i]));
+        wheel_radps[i] = wheel_[i].offline ? 0.0f : speed_radps;
+        max_abs_ref = std::fmax(max_abs_ref, std::fabs(wheel_radps[i]));
     }
     const float max_wheel_speed_radps =
         chassis_cfg::chassis.limits.max_wheel_speed_rpm * Sentry::Utils::Constants::RPM_TO_RAD_PER_SEC;
@@ -136,17 +219,28 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
         const float scale = max_wheel_speed_radps / max_abs_ref;
         for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
         {
-            logical_ref[i] *= scale;
+            wheel_radps[i] *= scale;
         }
         vx *= scale;
         vy *= scale;
         wz *= scale;
     }
+}
 
-    const bool use_force_ff = force_ff_config_valid() && dynamics_.IsAllocationValid();
-    float inertial_torque_nm[WHEEL_COUNT]{};
-    float speed_torque_nm[WHEEL_COUNT]{};
-    if (use_force_ff)
+/**
+ * @brief 计算四轮惯性、转向平移耦合及摩擦补偿力矩。
+ * @param vx 限速后的底盘 X 方向速度，单位为 m/s。
+ * @param vy 限速后的底盘 Y 方向速度，单位为 m/s。
+ * @param wz 限速后的底盘绕 Z 轴角速度，单位为 rad/s。
+ * @param wheel_radps 限速后的四轮转速目标，单位为 rad/s。
+ * @return 前馈启用状态及各轮惯性、速度相关的补偿力矩，单位为 N·m。
+ */
+ChassisCtrl::FeedforwardTorques ChassisCtrl::calculate_feedforward(
+    float vx, float vy, float wz, const float (&wheel_radps)[WHEEL_COUNT])
+{
+    FeedforwardTorques ff{};
+    ff.enabled = force_ff_config_valid() && dynamics_.IsAllocationValid();
+    if (ff.enabled)
     {
         const float ff_vx = planner_vx_.update(vx, DT_SEC);
         const float ff_vy = planner_vy_.update(vy, DT_SEC);
@@ -160,7 +254,7 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
                                   chassis_cfg::chassis.force_ff.yaw_inertia_kgm2 * ref_awz);
         for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
         {
-            inertial_torque_nm[i] = dynamics_.GetMotorTorque(i);
+            ff.inertial_nm[i] = dynamics_.GetMotorTorque(i);
         }
 
         const bool turning_translation_requested =
@@ -176,15 +270,15 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
         {
             const float wheel_alpha =
                 angular_accel[i].speed_rpm * Sentry::Utils::Constants::RPM_TO_RAD_PER_SEC;
-            inertial_torque_nm[i] += chassis_cfg::chassis.force_ff.wheel_equivalent_inertia_kgm2 * wheel_alpha;
-            const float wheel_speed = logical_ref[i];
+            ff.inertial_nm[i] += chassis_cfg::chassis.force_ff.wheel_equivalent_inertia_kgm2 * wheel_alpha;
+            const float wheel_speed = wheel_radps[i];
             float friction = chassis_cfg::chassis.force_ff.wheel_viscous_friction_nm_per_radps * wheel_speed;
             if constexpr (chassis_cfg::chassis.force_ff.wheel_coulomb_friction_nm != 0.0f)
             {
                 friction += chassis_cfg::chassis.force_ff.wheel_coulomb_friction_nm *
                             std::tanh(wheel_speed / chassis_cfg::chassis.force_ff.wheel_friction_smooth_radps);
             }
-            speed_torque_nm[i] = dynamics_.GetMotorTorque(i) + friction;
+            ff.speed_nm[i] = dynamics_.GetMotorTorque(i) + friction;
         }
     }
     else
@@ -193,7 +287,19 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
         planner_vy_.reset(vy);
         planner_wz_.reset(wz);
     }
+    return ff;
+}
 
+/**
+ * @brief 计算各轮 PID 和前馈电流，执行功率限制后发布电机指令。
+ * @param wheel_radps 四轮转速目标，单位为 rad/s。
+ * @param ff 四轮力矩前馈计算结果。
+ * @param feedback 四轮电机反馈，用于轮速闭环和功率估算。
+ */
+void ChassisCtrl::run_wheel_speed_control(const float (&wheel_radps)[WHEEL_COUNT],
+                                         const FeedforwardTorques &ff,
+                                         const Sentry::MotorFeedback (&feedback)[WHEEL_COUNT])
+{
     float requested_raw[WHEEL_COUNT]{};
     float requested_a[WHEEL_COUNT]{};
     float rotor_radps[WHEEL_COUNT]{};
@@ -209,21 +315,21 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
             continue;
         }
 
-        ref_wheel_radps_[i] = logical_ref[i];
-        const float fb_radps = feedback[i].output_speed_radps * wheel_sign_[i];
+        const float ref_radps = wheel_radps[i];
+        const float sign = App::Chassis::WHEEL_SIGN[i];
+        const float fb_radps = feedback[i].output_speed_radps * sign;
         float ff_raw = 0.0f;
-        if (use_force_ff && wheel_[i].fb_online)
+        if (ff.enabled && wheel_[i].fb_online)
         {
             const float inertial = ALG::Omni::guard_chassis_inertial_ff(
-                inertial_torque_nm[i], ref_wheel_radps_[i] - fb_radps,
+                ff.inertial_nm[i], ref_radps - fb_radps,
                 chassis_cfg::chassis.force_ff.inertial_fade_error_radps);
 
-            ff_raw = torque_to_raw_unclamped(inertial + speed_torque_nm[i]) * wheel_sign_[i];
+            ff_raw = torque_to_raw_unclamped(inertial + ff.speed_nm[i]) * sign;
         }
-        last_ff_current_raw_[i] = ff_raw;
-        const float pid_raw = wheel_[i].pid.update(ref_wheel_radps_[i], fb_radps, DT_SEC);
+        const float pid_raw = wheel_[i].pid.update(ref_radps, fb_radps, DT_SEC);
 
-        const float total_raw = ff_raw + pid_raw * wheel_sign_[i];
+        const float total_raw = ff_raw + pid_raw * sign;
         if (!std::isfinite(total_raw))
         {
             reset_wheel_control(i);
@@ -249,73 +355,35 @@ void ChassisCtrl::run_motion_command(OnmiChassisMode mode,
     ALG::Omni::PowerControl<WHEEL_COUNT>::Result power_result{};
     if (chassis_cfg::chassis.power.enabled)
     {
-
         power_result = power_control_.DecayingCurrent(
             requested_a, rotor_radps, chassis_cfg::chassis.power.model.coeffs, nullptr, fixed_power_w,
             power_strategy_.GetInputLimit(), active);
     }
     const bool power_fault = !power_result.valid || !power_result.feasible;
-    if (power_fault != power_model_fault_)
-    {
-        if (power_fault)
-        {
-        }
-        else
-        {
-        }
-        power_model_fault_ = power_fault;
-    }
 
-    bool any_enabled = false;
     for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
     {
         active[i] = active[i] && !power_fault;
+        std::int16_t current = 0;
         if (active[i])
         {
-
-            last_wheel_current_[i] =
+            current =
                 chassis_cfg::chassis.power.enabled
                     ? clamp_current(std::round(power_control_.getCurrent(i) / amp_per_raw))
                     : clamp_current(requested_raw[i]);
-            any_enabled = true;
         }
         else
         {
             reset_wheel_control(i);
         }
-        wheel_[i].cmd->publish(Sentry::MotorCommand{last_wheel_current_[i], active[i]});
+        wheel_[i].cmd->publish(Sentry::MotorCommand{current, active[i]});
     }
-    last_output_allowed_ = any_enabled;
 }
 
-void ChassisCtrl::Stop()
-{
-    mode_fsm_.force(OnmiChassisMode::STOP, Sentry::Time::now_ms());
-    reset_control();
-    last_output_allowed_ = false;
-    stop_all();
-}
-
-ALG::Omni::OmniSolver::Config ChassisCtrl::make_kinematics_config()
-{
-    ALG::Omni::OmniSolver::Config config{};
-    config.radius = chassis_cfg::chassis.geometry.chassis_radius_m;
-    config.scaling = chassis_cfg::chassis.geometry.wheel_radius_m;
-    config.wheel_azimuth[FL] = chassis_cfg::chassis.geometry.azimuth.fl_rad;
-    config.wheel_azimuth[FR] = chassis_cfg::chassis.geometry.azimuth.fr_rad;
-    config.wheel_azimuth[BL] = chassis_cfg::chassis.geometry.azimuth.bl_rad;
-    config.wheel_azimuth[BR] = chassis_cfg::chassis.geometry.azimuth.br_rad;
-    config.wheel_direction[FL] = chassis_cfg::chassis.geometry.direction.fl_rad;
-    config.wheel_direction[FR] = chassis_cfg::chassis.geometry.direction.fr_rad;
-    config.wheel_direction[BL] = chassis_cfg::chassis.geometry.direction.bl_rad;
-    config.wheel_direction[BR] = chassis_cfg::chassis.geometry.direction.br_rad;
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        config.chassis_direction[i] = 1.0f;
-    }
-    return config;
-}
-
+/**
+ * @brief 根据底盘半径、轮半径及各轮安装角创建逆动力学模型。
+ * @return 用于分配各轮前馈力矩的逆动力学模型。
+ */
 ALG::Omni::Omni_ID ChassisCtrl::make_dynamics()
 {
     const float wheel_azimuth[WHEEL_COUNT] = {
@@ -336,6 +404,10 @@ ALG::Omni::Omni_ID ChassisCtrl::make_dynamics()
                               static_cast<float>(WHEEL_COUNT), wheel_azimuth, wheel_direction);
 }
 
+/**
+ * @brief 生成 X、Y 方向共用的平移速度规划参数。
+ * @return 平移速度、加速度、减速度及加加速度限制。
+ */
 ALG::Omni::SCurveVelocityPlanning::Config ChassisCtrl::make_linear_planner_config()
 {
     ALG::Omni::SCurveVelocityPlanning::Config config{};
@@ -346,6 +418,10 @@ ALG::Omni::SCurveVelocityPlanning::Config ChassisCtrl::make_linear_planner_confi
     return config;
 }
 
+/**
+ * @brief 生成绕 Z 轴转动的速度规划参数。
+ * @return 角速度、角加速度、角减速度及角加加速度限制。
+ */
 ALG::Omni::SCurveVelocityPlanning::Config ChassisCtrl::make_angular_planner_config()
 {
     ALG::Omni::SCurveVelocityPlanning::Config config{};
@@ -356,6 +432,10 @@ ALG::Omni::SCurveVelocityPlanning::Config ChassisCtrl::make_angular_planner_conf
     return config;
 }
 
+/**
+ * @brief 检查力矩前馈是否启用及其物理参数是否有效。
+ * @return 前馈已启用且参数有效时返回 true。
+ */
 bool ChassisCtrl::force_ff_config_valid()
 {
     if (!chassis_cfg::chassis.force_ff.enabled)
@@ -387,6 +467,10 @@ bool ChassisCtrl::force_ff_config_valid()
             chassis_cfg::chassis.force_ff.wheel_viscous_friction_nm_per_radps > 0.0f);
 }
 
+/**
+ * @brief 校验功率模型、固定功耗及电流换算参数。
+ * @return 功率限制所需参数有效时返回 true。
+ */
 bool ChassisCtrl::power_control_config_valid()
 {
     for (const float coefficient : chassis_cfg::chassis.power.model.coeffs)
@@ -402,23 +486,27 @@ bool ChassisCtrl::power_control_config_valid()
            chassis_cfg::chassis.wheel.motor.command_max_raw > 0.0f;
 }
 
+/**
+ * @brief 更新裁判系统功率预算与底盘输出许可。
+ * @param now 当前控制周期的毫秒时间戳。
+ */
 void ChassisCtrl::update_power_budget(std::uint32_t now)
 {
     const Sentry::RefereeData referee = sentry_data.referee.read();
-    const auto previous = power_strategy_.GetRefereeSource();
     power_strategy_.UpdateReferee(now, referee.online(chassis_cfg::chassis.power.referee_timeout_ms),
                                   referee.robot_status_count, referee.power_heat_count,
                                   static_cast<float>(referee.status.chassis_power_limit),
                                   static_cast<float>(referee.power.buffer_energy),
                                   referee.status.power_management_chassis_output != 0U);
-    const auto source = power_strategy_.GetRefereeSource();
     power_output_allowed_ =
         !chassis_cfg::chassis.power.enabled || power_strategy_.GetInputLimit() > 0.0f;
-    if (source != previous)
-    {
-    }
 }
 
+/**
+ * @brief 将轮端目标力矩换算为未经限幅的电流指令。
+ * @param torque_nm 目标力矩，单位为 N·m。
+ * @return 电流指令原始值，力矩或换算参数无效时返回 0。
+ */
 float ChassisCtrl::torque_to_raw_unclamped(float torque_nm)
 {
     const float k_tau = chassis_cfg::chassis.wheel.motor.torque_constant_nm_per_a;
@@ -434,18 +522,23 @@ float ChassisCtrl::torque_to_raw_unclamped(float torque_nm)
     return torque_nm / k_tau * command_max / current_max;
 }
 
-bool ChassisCtrl::remote_connected(const Sentry::RemoteData &remote)
-{
-    return dt7_connected(remote, chassis_cfg::chassis.timeouts.remote_connection_ms);
-}
-
+/**
+ * @brief 检查遥控反馈有效期和禁用拨杆组合。
+ * @param remote 遥控器数据快照。
+ * @return 遥控器在线且允许底盘工作时返回 true。
+ */
 bool ChassisCtrl::remote_allows_enable(const Sentry::RemoteData &remote)
 {
-    return remote_connected(remote) &&
-           !(dt7_switch(remote, DT7_CH_S1) == chassis_cfg::chassis.input.switches.disable_s1 &&
-             dt7_switch(remote, DT7_CH_S2) == chassis_cfg::chassis.input.switches.disable_s2);
+    const auto &switches = chassis_cfg::chassis.input.switches;
+    return Sentry::Time::fresh(remote.timestamp, chassis_cfg::chassis.timeouts.remote_connection_ms) &&
+           !(remote.s1 == switches.disable_s1 && remote.s2 == switches.disable_s2);
 }
 
+/**
+ * @brief 根据遥控器在线状态和拨杆档位决定底盘控制模式。
+ * @param remote 遥控器数据快照。
+ * @return 停止、跟随、不跟随或自动模式。
+ */
 OnmiChassisMode ChassisCtrl::select_mode(const Sentry::RemoteData &remote)
 {
     if (!remote_allows_enable(remote))
@@ -453,8 +546,8 @@ OnmiChassisMode ChassisCtrl::select_mode(const Sentry::RemoteData &remote)
         return OnmiChassisMode::STOP;
     }
 
-    const std::uint8_t s1 = dt7_switch(remote, DT7_CH_S1);
-    const std::uint8_t s2 = dt7_switch(remote, DT7_CH_S2);
+    const std::uint8_t s1 = remote.s1;
+    const std::uint8_t s2 = remote.s2;
 
     if (s1 == chassis_cfg::chassis.input.switches.auto_s1 && s2 == chassis_cfg::chassis.input.switches.auto_s2)
     {
@@ -471,6 +564,12 @@ OnmiChassisMode ChassisCtrl::select_mode(const Sentry::RemoteData &remote)
     return OnmiChassisMode::STOP;
 }
 
+/**
+ * @brief 检查运动指令的来源是否与当前底盘模式匹配。
+ * @param mode 当前底盘控制模式。
+ * @param command 待执行的底盘运动指令。
+ * @return 指令来源与模式匹配时返回 true。
+ */
 bool ChassisCtrl::command_matches_mode(OnmiChassisMode mode,
                                        const App::Chassis::ChassisMotionCommand &command)
 {
@@ -488,6 +587,13 @@ bool ChassisCtrl::command_matches_mode(OnmiChassisMode mode,
     return false;
 }
 
+/**
+ * @brief 检查遥控许可、指令有效期、来源及速度值是否满足控制输出条件。
+ * @param remote 遥控器数据快照。
+ * @param mode 当前底盘控制模式。
+ * @param command 待执行的底盘运动指令。
+ * @return 满足全部输出条件时返回 true。
+ */
 bool ChassisCtrl::system_safe_for_output(const Sentry::RemoteData &remote, OnmiChassisMode mode,
                                          const App::Chassis::ChassisMotionCommand &command)
 {
@@ -498,49 +604,27 @@ bool ChassisCtrl::system_safe_for_output(const Sentry::RemoteData &remote, OnmiC
            command_matches_mode(mode, command);
 }
 
-const char *ChassisCtrl::mode_name(OnmiChassisMode mode)
-{
-    switch (mode)
-    {
-    case OnmiChassisMode::STOP:
-        return "STOP";
-    case OnmiChassisMode::FOLLOW:
-        return "FOLLOW";
-    case OnmiChassisMode::NO_FOLLOW:
-        return "NO_FOLLOW";
-    case OnmiChassisMode::AUTO:
-        return "AUTO";
-    case OnmiChassisMode::COUNT:
-        return "COUNT";
-    }
-    return "?";
-}
-
-bool ChassisCtrl::update_fb_offline(const Sentry::MotorFeedback &feedback, std::uint32_t now,
-                                    std::uint32_t &offline_since_ms)
+/**
+ * @brief 判断电机反馈是否达到硬离线条件。
+ * @param feedback 当前轮电机反馈。
+ * @param now 当前控制周期的毫秒时间戳。
+ * @return 从未收到反馈，或反馈未通过软在线检查且达到硬超时时，返回 true。
+ */
+bool ChassisCtrl::feedback_hard_offline(const Sentry::MotorFeedback &feedback, std::uint32_t now)
 {
     if (feedback.is_online(chassis_cfg::chassis.timeouts.motor_fb_soft_ms))
     {
-        offline_since_ms = 0U;
         return false;
     }
-    if (feedback.timestamp == 0U)
-    {
-        offline_since_ms = now;
-        return true;
-    }
-    if (offline_since_ms == 0U)
-    {
-        offline_since_ms = now;
-    }
-    return fb_age_ms(now, feedback) >= chassis_cfg::chassis.timeouts.motor_fb_hard_ms;
+    return feedback.timestamp == 0U ||
+           now - feedback.timestamp >= chassis_cfg::chassis.timeouts.motor_fb_hard_ms;
 }
 
-std::uint32_t ChassisCtrl::fb_age_ms(std::uint32_t now, const Sentry::MotorFeedback &feedback)
-{
-    return feedback.timestamp == 0U ? 0xFFFFFFFFUL : now - feedback.timestamp;
-}
-
+/**
+ * @brief 限制电流指令范围并转换为电机接口接受的整数。
+ * @param value 需要限幅的电流指令原始值。
+ * @return 限幅后的电流指令，输入为非有限值时返回 0。
+ */
 std::int16_t ChassisCtrl::clamp_current(float value)
 {
     if (!std::isfinite(value))
@@ -551,6 +635,10 @@ std::int16_t ChassisCtrl::clamp_current(float value)
                                                           chassis_cfg::chassis.wheel.speed_pid.output_max));
 }
 
+/**
+ * @brief 复位指定车轮的轮速 PID。
+ * @param index 车轮索引，顺序为左前、右前、左后、右后。
+ */
 void ChassisCtrl::reset_wheel_control(std::uint8_t index)
 {
     if (index >= WHEEL_COUNT)
@@ -558,28 +646,11 @@ void ChassisCtrl::reset_wheel_control(std::uint8_t index)
         return;
     }
     wheel_[index].pid.reset();
-    ref_wheel_radps_[index] = 0.0f;
-    last_ff_current_raw_[index] = 0.0f;
-    last_wheel_current_[index] = 0;
 }
 
-const char *ChassisCtrl::wheel_name(std::uint8_t index)
-{
-    switch (index)
-    {
-    case FL:
-        return "FL";
-    case FR:
-        return "FR";
-    case BL:
-        return "BL";
-    case BR:
-        return "BR";
-    default:
-        return "?";
-    }
-}
-
+/**
+ * @brief 复位功率控制、三个速度规划器和四轮轮速 PID。
+ */
 void ChassisCtrl::reset_control()
 {
     power_control_.reset();
@@ -592,6 +663,9 @@ void ChassisCtrl::reset_control()
     }
 }
 
+/**
+ * @brief 复位四轮轮速 PID，并向已绑定的电机指令通道发布零电流和禁用状态。
+ */
 void ChassisCtrl::stop_all()
 {
     for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
@@ -602,601 +676,4 @@ void ChassisCtrl::stop_all()
             wheel_[i].cmd->publish(Sentry::MotorCommand{0, false});
         }
     }
-}
-
-ChassisCtrl::Inputs ChassisCtrl::readInputs()
-{
-    Inputs in{};
-    in.nowMs = Sentry::Time::now_ms();
-    in.remote = sentry_data.remote.read();
-    in.command = sentry_data.motion_command.read();
-
-    update_power_budget(in.nowMs);
-
-    in.anyOffline = false;
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        in.feedback[i] = wheel_[i].fb->read();
-        const bool was_fb_online = wheel_[i].fb_online;
-        wheel_[i].fb_online = in.feedback[i].timestamp != 0U &&
-                              in.feedback[i].is_online(chassis_cfg::chassis.timeouts.motor_fb_soft_ms);
-
-        const bool was_offline = wheel_[i].offline;
-        wheel_[i].offline = update_fb_offline(in.feedback[i], in.nowMs, wheel_offline_since_ms_[i]);
-        if (wheel_[i].offline != was_offline)
-        {
-            reset_wheel_control(i);
-        }
-        in.anyOffline = in.anyOffline || wheel_[i].offline;
-    }
-
-    return in;
-}
-
-ChassisCtrl::ChassisCtrl() : kinematics_(make_kinematics_config()), dynamics_(make_dynamics()) {}
-
-bool ChassisCtrl::Init()
-{
-
-    if (chassis_cfg::chassis.power.enabled && !power_control_config_valid())
-    {
-
-        return false;
-    }
-    ALG::Omni::PowerControlStrategy::RefereeConfig power_config{};
-    power_config.fallback_w = chassis_cfg::chassis.power.fallback_w;
-    power_config.margin_w = chassis_cfg::chassis.power.margin_w;
-    power_config.timeout_ms = chassis_cfg::chassis.power.referee_timeout_ms;
-    power_config.buffer_low_j = chassis_cfg::chassis.power.buffer_low_j;
-    power_config.buffer_recover_j = chassis_cfg::chassis.power.buffer_recover_j;
-    power_config.low_buffer_scale = chassis_cfg::chassis.power.low_buffer_scale;
-    if (!power_strategy_.ConfigureReferee(power_config) && chassis_cfg::chassis.power.enabled)
-    {
-
-        return false;
-    }
-    power_control_.configure({chassis_cfg::chassis.power.model.absolute_speed_loss, false,
-                              chassis_cfg::chassis.wheel.motor.current_max_a /
-                                  chassis_cfg::chassis.wheel.motor.command_max_raw});
-
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        wheel_[i].name = wheel_name(i);
-        wheel_[i].fb = &sentry_data.wheel_fb[i];
-        wheel_[i].cmd = &sentry_data.wheel_cmd[i];
-        wheel_[i].pid.set_config(WHEEL_PID_DEFAULT);
-    }
-
-    planner_vx_.configure(make_linear_planner_config());
-    planner_vy_.configure(make_linear_planner_config());
-    planner_wz_.configure(make_angular_planner_config());
-
-    reset_control();
-    mode_fsm_.init(OnmiChassisMode::STOP, Sentry::Time::now_ms());
-
-    return true;
-}
-
-namespace
-{
-
-constexpr std::size_t DT7_CH_LEFT_Y = 0U;
-constexpr std::size_t DT7_CH_LEFT_X = 1U;
-
-constexpr std::size_t DT7_CH_LEFT_SCROLL = 5U;
-
-float remote_channel_normalized(const Sentry::RemoteData &remote, std::size_t index)
-{
-    switch (index)
-    {
-    case DT7_CH_LEFT_Y:
-        return remote.left_y;
-    case DT7_CH_LEFT_X:
-        return remote.left_x;
-    case DT7_CH_LEFT_SCROLL:
-        return remote.scroll_norm;
-    default:
-        return 0.0f;
-    }
-}
-
-float apply_remote_deadband(float value)
-{
-    const float deadband = chassis_cfg::chassis.input.analog_deadband;
-    const float magnitude = std::fabs(value);
-    if (deadband <= 0.0f || magnitude <= deadband)
-    {
-        return deadband > 0.0f ? 0.0f : value;
-    }
-    if (deadband >= 1.0f)
-    {
-        return 0.0f;
-    }
-
-    const float scaled = (magnitude - deadband) / (1.0f - deadband);
-    return value < 0.0f ? -scaled : scaled;
-}
-
-} // namespace
-
-void ChassisCmd::Update()
-{
-    // 仲裁本地遥控器与云台请求，校验新鲜度后发布唯一的底盘指令。
-
-    const auto in = readInputs();
-
-    const bool host_request_fresh = in.host.is_online(chassis_cfg::chassis.timeouts.host_request_ms);
-
-    const bool gimbal_gate_fresh = in.gate.is_online(chassis_cfg::chassis.timeouts.gimbal_motion_gate_ms);
-    const bool gimbal_switch_lock = (gimbal_gate_fresh && in.gate.locks_chassis()) ||
-                                    (in.gate.timestamp != 0U && !gimbal_gate_fresh &&
-                                     in.gate.state != App::Chassis::GimbalMotionGateState::NORMAL);
-
-    std::uint8_t flags = 0U;
-    if (remote_connected(in.remote))
-    {
-        flags |= App::Chassis::CHASSIS_CMD_REMOTE_FRESH;
-    }
-    if (host_request_fresh)
-    {
-        flags |= App::Chassis::CHASSIS_CMD_HOST_REQUEST_FRESH;
-    }
-
-    App::Chassis::ChassisMotionCommand command = make_stop(in.nowMs, flags);
-    const Selection selection = select(in.remote);
-    bool limited = false;
-
-    switch (selection)
-    {
-    case Selection::Auto:
-        command.flags |= App::Chassis::CHASSIS_CMD_NAVIGATION_SELECTED;
-
-        command.source = App::Chassis::ChassisMotionSource::Navigation;
-        follow_pid_.reset();
-        if (host_request_fresh && is_finite(in.host.vx_mps) && is_finite(in.host.vy_mps) &&
-            is_finite(in.host.wz_radps))
-        {
-            command.vx_mps = in.host.vx_mps;
-            command.vy_mps = in.host.vy_mps;
-            command.wz_radps = in.host.wz_radps;
-        }
-        break;
-
-    case Selection::Manual:
-    {
-        const float left_y =
-            apply_remote_deadband(remote_channel_normalized(in.remote, DT7_CH_LEFT_Y));
-        const float left_x =
-            apply_remote_deadband(remote_channel_normalized(in.remote, DT7_CH_LEFT_X));
-        const float scroll =
-            apply_remote_deadband(remote_channel_normalized(in.remote, DT7_CH_LEFT_SCROLL));
-
-        const bool shooter_scroll_owned = shooter_owns_scroll(in.remote);
-        if (!is_finite(left_y) || !is_finite(left_x) || !is_finite(scroll))
-        {
-            follow_pid_.reset();
-            break;
-        }
-
-        command.vx_mps = Sentry::Utils::clamp(left_y, -1.0f, 1.0f) * chassis_cfg::chassis.limits.max_planar_speed_mps;
-        command.vy_mps = -Sentry::Utils::clamp(left_x, -1.0f, 1.0f) * chassis_cfg::chassis.limits.max_planar_speed_mps;
-
-        if (follow_selected(in.remote))
-        {
-            const App::Chassis::GimbalYawJointFeedback yaw =
-                true ? sentry_data.yaw_joint.read() : App::Chassis::GimbalYawJointFeedback{};
-            if (yaw.is_online(chassis_cfg::chassis.manual.gimbal_yaw_timeout_ms) &&
-                is_finite(yaw.yaw_angle_rad))
-            {
-                const float sign = chassis_cfg::chassis.manual.gimbal_yaw_sign;
-                command.wz_radps = Sentry::Utils::calculate_follow_wz(
-                    sign * chassis_cfg::chassis.manual.gimbal_yaw_zero_rad, sign * yaw.yaw_angle_rad,
-                    follow_pid_, DT_SEC, chassis_cfg::chassis.follow_yaw.deadband_rad,
-                    chassis_cfg::chassis.follow_yaw.half_range_rad);
-            }
-            else
-            {
-                follow_pid_.reset();
-                command.wz_radps = 0.0f;
-            }
-        }
-        else
-        {
-            follow_pid_.reset();
-            command.wz_radps = shooter_scroll_owned ? 0.0f
-                                                    : Sentry::Utils::clamp(scroll, -1.0f, 1.0f) *
-                                                          chassis_cfg::chassis.limits.max_angular_speed_radps;
-        }
-
-        command.source = App::Chassis::ChassisMotionSource::Manual;
-        break;
-    }
-    case Selection::Stop:
-        follow_pid_.reset();
-        break;
-    }
-
-    limited = !std::isfinite(command.vx_mps) || !std::isfinite(command.vy_mps) ||
-              !std::isfinite(command.wz_radps) ||
-              std::fabs(command.vx_mps) > chassis_cfg::chassis.limits.max_planar_speed_mps ||
-              std::fabs(command.vy_mps) > chassis_cfg::chassis.limits.max_planar_speed_mps ||
-              std::hypot(command.vx_mps, command.vy_mps) > chassis_cfg::chassis.limits.max_planar_speed_mps ||
-              std::fabs(command.wz_radps) > chassis_cfg::chassis.limits.max_angular_speed_radps;
-
-    if (gimbal_switch_lock)
-    {
-
-        if (command.source == App::Chassis::ChassisMotionSource::Stop &&
-            remote_allows_enable(in.remote))
-        {
-            command.source = selection == Selection::Auto
-                                 ? App::Chassis::ChassisMotionSource::Navigation
-                                 : App::Chassis::ChassisMotionSource::Manual;
-        }
-        command.vx_mps = 0.0f;
-        command.vy_mps = 0.0f;
-        command.wz_radps = 0.0f;
-        command.flags |= App::Chassis::CHASSIS_CMD_GIMBAL_TRANSITION_LOCK;
-        follow_pid_.reset();
-    }
-
-    if (limited)
-    {
-        command.flags |= App::Chassis::CHASSIS_CMD_VALUE_LIMITED;
-    }
-
-    publish(command);
-}
-
-void ChassisCmd::Stop()
-{
-    follow_pid_.reset();
-    publish(make_stop(Sentry::Time::now_ms(), 0U));
-}
-
-bool ChassisCmd::is_finite(float value)
-{
-    return std::isfinite(value);
-}
-
-bool ChassisCmd::remote_connected(const Sentry::RemoteData &remote)
-{
-    return dt7_connected(remote, chassis_cfg::chassis.timeouts.remote_connection_ms);
-}
-
-bool ChassisCmd::remote_allows_enable(const Sentry::RemoteData &remote)
-{
-    return remote_connected(remote) &&
-           !(dt7_switch(remote, DT7_CH_S1) == chassis_cfg::chassis.input.switches.disable_s1 &&
-             dt7_switch(remote, DT7_CH_S2) == chassis_cfg::chassis.input.switches.disable_s2);
-}
-
-bool ChassisCmd::auto_selected(const Sentry::RemoteData &remote)
-{
-    return remote_allows_enable(remote) &&
-           dt7_switch(remote, DT7_CH_S1) == chassis_cfg::chassis.input.switches.auto_s1 &&
-           dt7_switch(remote, DT7_CH_S2) == chassis_cfg::chassis.input.switches.auto_s2;
-}
-
-bool ChassisCmd::follow_selected(const Sentry::RemoteData &remote)
-{
-    if (!remote_allows_enable(remote))
-    {
-        return false;
-    }
-    const std::uint8_t s1 = dt7_switch(remote, DT7_CH_S1);
-    const std::uint8_t s2 = dt7_switch(remote, DT7_CH_S2);
-    return (s1 == chassis_cfg::chassis.input.switches.follow_s1 && s2 == chassis_cfg::chassis.input.switches.follow_s2);
-}
-
-bool ChassisCmd::shooter_owns_scroll(const Sentry::RemoteData &remote)
-{
-
-    return remote_allows_enable(remote) &&
-           dt7_switch(remote, DT7_CH_S1) == chassis_cfg::chassis.input.switches.shooter_scroll_s1;
-}
-
-ChassisCmd::Selection ChassisCmd::select(const Sentry::RemoteData &remote)
-{
-    if (!remote_allows_enable(remote))
-    {
-        return Selection::Stop;
-    }
-    if (auto_selected(remote))
-    {
-        return Selection::Auto;
-    }
-    return Selection::Manual;
-}
-
-App::Chassis::ChassisMotionCommand ChassisCmd::make_stop(std::uint32_t now_ms, std::uint8_t flags)
-{
-    App::Chassis::ChassisMotionCommand command{};
-    command.timestamp = now_ms;
-    command.source = App::Chassis::ChassisMotionSource::Stop;
-    command.flags = flags;
-    return command;
-}
-
-void ChassisCmd::publish(App::Chassis::ChassisMotionCommand command)
-{
-    {
-        sentry_data.motion_command.publish(command);
-    }
-}
-
-ChassisCmd::Inputs ChassisCmd::readInputs()
-{
-    Inputs in{};
-    in.nowMs = Sentry::Time::now_ms();
-    in.remote = sentry_data.remote.read();
-    in.host = true ? sentry_data.host.read() : App::Chassis::HostMotionRequest{};
-    in.gate = true ? sentry_data.motion_gate.read() : App::Chassis::GimbalMotionGate{};
-    in.heading = true ? sentry_data.heading.read() : App::Chassis::HeadingFeedback{};
-    in.yawJoint = true ? sentry_data.yaw_joint.read() : App::Chassis::GimbalYawJointFeedback{};
-    return in;
-}
-
-ChassisCmd::ChassisCmd() {}
-
-bool ChassisCmd::Init()
-{
-
-    follow_pid_.set_config(ALG::Omni::TimePid::Config{
-        chassis_cfg::chassis.follow_yaw.angle_pid.kp,
-        chassis_cfg::chassis.follow_yaw.angle_pid.ki,
-        chassis_cfg::chassis.follow_yaw.angle_pid.kd,
-        chassis_cfg::chassis.follow_yaw.angle_pid.output_max_radps,
-        chassis_cfg::chassis.follow_yaw.angle_pid.output_min_radps,
-        chassis_cfg::chassis.follow_yaw.angle_pid.integral_max_rad_s,
-    });
-    follow_pid_.reset();
-    sentry_data.motion_command.publish(make_stop(Sentry::Time::now_ms(), 0U));
-    return true;
-}
-
-namespace
-{
-constexpr float PI = 3.14159265358979323846f;
-}
-
-void ChassisOdom::Update()
-{
-    // 合并有效轮速和航向反馈，更新并发布底盘里程计。
-
-    const auto in = readInputs();
-
-    const bool wheels_fresh = in.validWheels == WHEEL_COUNT;
-    ALG::Omni::ChassisOdometry velocity{};
-    bool kinematics_valid = false;
-    bool stationary_gated = false;
-    if (wheels_fresh)
-    {
-        kinematics_.forward_kinematics(in.wheelRpm, velocity);
-        kinematics_valid = finite(velocity.vx) && finite(velocity.vy) && finite(velocity.vw) &&
-                           std::hypot(velocity.vx, velocity.vy) <= odom_cfg::odometry.limits.max_linear_speed_mps &&
-                           std::fabs(velocity.vw) <= odom_cfg::odometry.limits.max_angular_speed_radps;
-    }
-    if (kinematics_valid)
-    {
-        if (std::fabs(velocity.vx) < odom_cfg::odometry.deadband.linear_mps)
-        {
-            velocity.vx = 0.0f;
-        }
-        if (std::fabs(velocity.vy) < odom_cfg::odometry.deadband.linear_mps)
-        {
-            velocity.vy = 0.0f;
-        }
-        if (std::fabs(velocity.vw) < odom_cfg::odometry.deadband.angular_radps)
-        {
-            velocity.vw = 0.0f;
-        }
-        stationary_gated = apply_stationary_gate(velocity);
-        state_.vx_body_mps = velocity.vx;
-        state_.vy_body_mps = velocity.vy;
-        state_.wz_radps = velocity.vw;
-    }
-    else
-    {
-        stationary_lock_ = true;
-        state_.vx_body_mps = 0.0f;
-        state_.vy_body_mps = 0.0f;
-        state_.wz_radps = 0.0f;
-    }
-
-    const App::Chassis::HeadingFeedback heading = sentry_data.heading.read();
-    const bool heading_fresh =
-        heading.is_online(odom_cfg::odometry.timeouts.heading_ms) && finite(heading.yaw_rad);
-    bool heading_jump = false;
-    float integration_yaw = state_.yaw_rad;
-    const bool was_ready = ready_;
-    if (heading_fresh)
-    {
-        const float yaw = wrap_angle(heading.yaw_rad);
-        state_.heading_timestamp = heading.timestamp;
-        if (!ready_)
-        {
-            state_.yaw_rad = yaw;
-            ready_ = true;
-        }
-        else
-        {
-            const float delta = wrap_angle(yaw - state_.yaw_rad);
-            if (std::fabs(delta) > odom_cfg::odometry.limits.max_heading_jump_rad)
-            {
-                state_.yaw_rad = yaw;
-                heading_jump = true;
-            }
-            else
-            {
-                integration_yaw = wrap_angle(state_.yaw_rad + 0.5f * delta);
-                state_.yaw_rad = yaw;
-            }
-        }
-    }
-
-    const bool dt_valid =
-        was_ready && in.dtMs >= odom_cfg::odometry.update.min_dt_ms && in.dtMs <= odom_cfg::odometry.update.max_dt_ms;
-    std::uint8_t flags = 0U;
-    if (ready_)
-        flags |= App::Chassis::ODOM_INITIALIZED;
-    if (heading_fresh)
-        flags |= App::Chassis::ODOM_HEADING_FRESH;
-    if (wheels_fresh)
-        flags |= App::Chassis::ODOM_WHEELS_FRESH;
-    if (kinematics_valid)
-        flags |= App::Chassis::ODOM_KINEMATICS_VALID;
-    if (dt_valid)
-        flags |= App::Chassis::ODOM_DT_VALID;
-    if (heading_jump)
-        flags |= App::Chassis::ODOM_HEADING_JUMP;
-    if (stationary_gated)
-        flags |= App::Chassis::ODOM_STATIONARY_GATED;
-
-    if (heading_fresh && kinematics_valid && dt_valid && !heading_jump && !stationary_gated)
-    {
-        const float dt_sec = static_cast<float>(in.dtMs) * 0.001f;
-        const float cos_yaw = std::cos(integration_yaw);
-        const float sin_yaw = std::sin(integration_yaw);
-        state_.x_m += (velocity.vx * cos_yaw - velocity.vy * sin_yaw) * dt_sec;
-        state_.y_m += (velocity.vx * sin_yaw + velocity.vy * cos_yaw) * dt_sec;
-        flags |= App::Chassis::ODOM_POSITION_INTEGRATED;
-    }
-    publish(in.nowMs, flags, in.validWheels);
-}
-
-void ChassisOdom::Stop()
-{
-    state_.vx_body_mps = 0.0f;
-    state_.vy_body_mps = 0.0f;
-    state_.wz_radps = 0.0f;
-    publish(Sentry::Time::now_ms(), 0U, 0U);
-}
-
-ALG::Omni::OmniSolver::Config ChassisOdom::make_kinematics_config()
-{
-    ALG::Omni::OmniSolver::Config config{};
-    config.radius = chassis_cfg::chassis.geometry.chassis_radius_m;
-    config.scaling = chassis_cfg::chassis.geometry.wheel_radius_m;
-    config.wheel_azimuth[FL] = chassis_cfg::chassis.geometry.azimuth.fl_rad;
-    config.wheel_azimuth[FR] = chassis_cfg::chassis.geometry.azimuth.fr_rad;
-    config.wheel_azimuth[BL] = chassis_cfg::chassis.geometry.azimuth.bl_rad;
-    config.wheel_azimuth[BR] = chassis_cfg::chassis.geometry.azimuth.br_rad;
-    config.wheel_direction[FL] = chassis_cfg::chassis.geometry.direction.fl_rad;
-    config.wheel_direction[FR] = chassis_cfg::chassis.geometry.direction.fr_rad;
-    config.wheel_direction[BL] = chassis_cfg::chassis.geometry.direction.bl_rad;
-    config.wheel_direction[BR] = chassis_cfg::chassis.geometry.direction.br_rad;
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        config.chassis_direction[i] = 1.0f;
-    }
-    return config;
-}
-
-bool ChassisOdom::finite(float value)
-{
-    return std::isfinite(value);
-}
-
-float ChassisOdom::wrap_angle(float value)
-{
-    float wrapped = std::fmod(value, 2.0f * PI);
-    if (wrapped > PI)
-    {
-        wrapped -= 2.0f * PI;
-    }
-    else if (wrapped < -PI)
-    {
-        wrapped += 2.0f * PI;
-    }
-    return wrapped;
-}
-
-bool ChassisOdom::apply_stationary_gate(ALG::Omni::ChassisOdometry &velocity)
-{
-    const float planar = std::hypot(velocity.vx, velocity.vy);
-    const float angular = std::fabs(velocity.vw);
-    if (stationary_lock_)
-    {
-        if (planar > odom_cfg::odometry.stationary.exit_linear_mps ||
-            angular > odom_cfg::odometry.stationary.exit_angular_radps)
-        {
-            stationary_lock_ = false;
-        }
-    }
-    else if (planar < odom_cfg::odometry.stationary.enter_linear_mps &&
-             angular < odom_cfg::odometry.stationary.enter_angular_radps)
-    {
-        stationary_lock_ = true;
-    }
-    if (!stationary_lock_)
-    {
-        return false;
-    }
-    velocity.vx = 0.0f;
-    velocity.vy = 0.0f;
-    velocity.vw = 0.0f;
-    return true;
-}
-
-void ChassisOdom::publish(std::uint32_t now, std::uint8_t flags, std::uint8_t valid_wheel_count)
-{
-    if (false)
-    {
-        return;
-    }
-    state_.timestamp = now;
-    state_.flags = flags;
-    state_.valid_wheel_count = valid_wheel_count;
-    state_.gimbal_motion_lock = gimbal_motion_lock_ ? 1U : 0U;
-    sentry_data.odometry.publish(state_);
-}
-
-ChassisOdom::Inputs ChassisOdom::readInputs()
-{
-    Inputs in{};
-    in.nowMs = Sentry::Time::now_ms();
-    const App::Chassis::GimbalMotionGate gimbal_gate =
-        true ? sentry_data.motion_gate.read() : App::Chassis::GimbalMotionGate{};
-    const bool gate_fresh = gimbal_gate.is_online(chassis_cfg::chassis.timeouts.gimbal_motion_gate_ms);
-    gimbal_motion_lock_ = (gate_fresh && gimbal_gate.locks_chassis()) ||
-                          (gimbal_gate.timestamp != 0U && !gate_fresh &&
-                           gimbal_gate.state != App::Chassis::GimbalMotionGateState::NORMAL);
-    in.dtMs = in.nowMs - last_update_ms_;
-    last_update_ms_ = in.nowMs;
-
-    constexpr float wheel_sign[WHEEL_COUNT] = {
-        chassis_cfg::chassis.wheel.sign.fl,
-        chassis_cfg::chassis.wheel.sign.fr,
-        chassis_cfg::chassis.wheel.sign.bl,
-        chassis_cfg::chassis.wheel.sign.br,
-    };
-    in.validWheels = 0U;
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        const Sentry::MotorFeedback feedback = wheel_sub_[i]->read();
-        if (feedback.is_online(odom_cfg::odometry.timeouts.motor_fb_ms) && finite(feedback.output_speed_rpm))
-        {
-            in.wheelRpm[i] = feedback.output_speed_rpm * wheel_sign[i];
-            ++in.validWheels;
-        }
-    }
-    return in;
-}
-
-ChassisOdom::ChassisOdom() : kinematics_(make_kinematics_config()) {}
-
-bool ChassisOdom::Init()
-{
-    for (std::uint8_t i = 0U; i < WHEEL_COUNT; ++i)
-    {
-        wheel_sub_[i] = &sentry_data.wheel_fb[i];
-    }
-
-    state_ = App::Chassis::ChassisOdometry{};
-    last_update_ms_ = Sentry::Time::now_ms();
-    ready_ = false;
-    stationary_lock_ = true;
-
-    return true;
 }

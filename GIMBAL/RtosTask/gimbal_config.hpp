@@ -89,8 +89,8 @@ struct GimbalConfig
         {
             float j_kg_m2{0.012706f};
             float b_nms_rad{0.00749f};
-            float k_theta{7.70298f};
-            float k_omega{0.652f};
+            float k_theta{13.70298f};
+            float k_omega{0.90f};
             float k_i{2.5f};
             float theta_integral_limit_rad_s{5.0f};
             float ff_gain{0.8f};
@@ -128,8 +128,8 @@ struct GimbalConfig
         struct Manual
         {
             float q_deadband_rad{0.08f};
-            float q_kp_radps_per_rad{3.0f};
-            float speed_limit_radps{4.0f};
+            float q_kp_radps_per_rad{3.5f};
+            float speed_limit_radps{5.0f};
             float accel_limit_radps2{50.0f};
             float jerk_limit_radps3{500.0f};
         } manual{};
@@ -224,17 +224,17 @@ struct GimbalConfig
         // 视觉模式底盘跟随限幅及运动趋势估计参数。
         struct Base
         {
-            float speed_limit_radps{3.0f};
-            float accel_limit_radps2{10.0f};
-            float jerk_limit_radps3{100.0f};
+            float speed_limit_radps{4.0f};
+            float accel_limit_radps2{15.0f};
+            float jerk_limit_radps3{150.0f};
 
         // 目标居中保持的增益、运动补偿和积分抑制参数。
         struct Hold
             {
-                float kp_radps_per_rad{5.0f};
-                float speed_limit_radps{3.0f};
-                float accel_limit_radps2{15.0f};
-                float motion_trend_cutoff_hz{0.5f};
+                float kp_radps_per_rad{8.0f};
+                float speed_limit_radps{4.0f};
+                float accel_limit_radps2{20.0f};
+                float motion_trend_cutoff_hz{0.6f};
                 float motion_speed_start_radps{0.08f};
                 float motion_speed_full_radps{0.40f};
                 float motion_rise_time_sec{0.03f};
@@ -252,7 +252,7 @@ struct GimbalConfig
             struct Trend
             {
                 float bandwidth_rad_s{3.0f};
-                float damping{2.0f};
+                float damping{1.5f};
                 float accel_limit_radps2{10.0f};
             } trend{};
 
@@ -266,7 +266,7 @@ struct GimbalConfig
         // 目标 q 轴居中、软限幅及短时预测参数。
         struct Q
         {
-            float centering_kp_radps_per_rad{3.0f};
+            float centering_kp_radps_per_rad{4.0f};
             float soft_start_rad{0.35f};
             float soft_full_rad{0.42f};
             float center_rad{0.0f};
@@ -281,6 +281,19 @@ struct GimbalConfig
             float yaw_speed_tol_radps{0.30f};
             std::uint32_t acquire_hold_ms{80U};
         } acquire{};
+
+        // 本地位置跟踪门控；阈值为台架调试初值，单位 rad，时间单位 ms。
+        struct FireGate
+        {
+            bool enabled{true}; // true 启用本地位置门控，false 跳过本地位置稳定判定。
+            float yaw_enter_rad{0.025f};
+            float yaw_exit_rad{0.05f};
+            float pitch_enter_rad{0.02f};
+            float pitch_exit_rad{0.05f};
+            std::uint32_t stable_hold_ms{10U};
+            std::uint32_t feedback_timeout_ms{20U};
+            std::uint32_t status_timeout_ms{10U};
+        } fire_gate{};
 
         // 目标丢失后保持锁定状态的宽限时间。
         struct Lock
@@ -319,12 +332,16 @@ struct GimbalConfig
         bool enabled{true}; // 是否启用巡逻模式。
         float base_cruise_speed_radps{2.2f}; // 底盘巡航角速度。
 
+        // roll 角度偏差的巡航进入和退出阈值。
+        float roll_enter_error_rad{0.1f};
+        float roll_exit_error_rad{0.15f};
+
         // 巡逻 yaw 正弦扫描的中心、幅值、频率和角度范围。
         struct Yaw
         {
             float center_rad{0.0f};
             float amplitude_rad{0.209439510f};
-            float frequency_hz{1.8f};
+            float frequency_hz{1.5f};
             float min_rad{-0.351799388f};
             float max_rad{0.351799388f};
 
@@ -359,8 +376,8 @@ struct GimbalConfig
             float center_rad{0.0f};
             float amplitude_rad{0.087266463f};
             float frequency_hz{2.0f};
-            float min_rad{-0.30453293f};
-            float max_rad{0.30453293f};
+            float min_rad{-0.35453293f};
+            float max_rad{0.35453293f};
             bool use_imu_fb{true}; // true 使用 IMU，false 使用电机编码器反馈。
 
             // pitch 编码器角度环 PID，输出为参考角速度。
@@ -386,14 +403,14 @@ struct GimbalConfig
         struct Reference
         {
             float normal_rad{2.83f};
-            float transform_rad{4.659f};
+            float transform_rad{4.675f};
         } reference{};
 
         // roll 阻抗控制的刚度、阻尼和变形比例。
         struct Impedance
         {
             float stiffness_nm_per_rad{32.0f};
-            float damping_nms_rad{2.3f};
+            float damping_nms_rad{2.5f};
             float transform_ratio{0.6f};
         } impedance{};
 
@@ -408,9 +425,9 @@ struct GimbalConfig
         // roll S 曲线轨迹的速度、加速度和加加速度上限。
         struct Trajectory
         {
-            float max_speed_radps{7.0f};
-            float max_accel_radps2{20.0f};
-            float max_jerk_radps3{200.0f};
+            float max_speed_radps{5.0f};
+            float max_accel_radps2{25.0f};
+            float max_jerk_radps3{150.0f};
         } trajectory{};
 
         // roll 重力前馈系数及补偿相位。
@@ -428,7 +445,7 @@ struct GimbalConfig
         // 变形时底盘、yaw 和 pitch 轴的目标角。
         struct Reference
         {
-            float base_rad{4.6881f};
+            float base_rad{4.848f};
             float yaw_rad{5.275f};
             float pitch_rad{5.480f};
         } reference{};
@@ -436,28 +453,28 @@ struct GimbalConfig
         // 判定各轴到位所需的角度误差和速度阈值。
         struct Arrival
         {
-            float angle_tolerance_rad{0.087453293f};
-            float speed_tolerance_radps{0.187266463f};
+            float angle_tolerance_rad{0.1f};
+            float speed_tolerance_radps{0.50f};
         } arrival{};
         std::uint16_t stable_cycles{10U};
         std::uint32_t phase_timeout_ms{3000U};
 
-        // 变形时底盘 yaw 角度环和 MIT 阻尼。
+        // Base 变形时由主控闭合角度环，驱动通过 MIT Kd 闭合速度环。
         struct Base
         {
-
-            // 底盘变形角度环 PID。
+            // 角度环输入 rad，输出 rad/s。
             struct AnglePid
             {
                 float kp{6.0f};
                 float ki{0.0f};
                 float kd{0.0f};
-                float output_max{10.0f};
-                float output_min{-10.0f};
+                float output_max{20.0f};
+                float output_min{-20.0f};
                 float integral_max{5.0f};
                 float integral_separation_rad{0.07f};
                 float integral_reset_rad{0.15f};
             } angle_pid{};
+
             float mit_kd{0.8f};
         } base{};
 
@@ -468,11 +485,11 @@ struct GimbalConfig
             // yaw 变形角度环 PID。
             struct AnglePid
             {
-                float kp{8.0f};
+                float kp{20.0f};
                 float ki{0.0f};
                 float kd{0.0f};
-                float output_max{30.0f};
-                float output_min{-30.0f};
+                float output_max{50.0f};
+                float output_min{-50.0f};
                 float integral_max{1.0f};
                 float integral_separation_rad{0.07f};
                 float integral_reset_rad{0.15f};
@@ -481,7 +498,7 @@ struct GimbalConfig
             // yaw 变形速度环 PID，输出为转矩。
             struct SpeedPid
             {
-                float kp{0.15f};
+                float kp{0.2f};
                 float ki{0.0f};
                 float kd{0.0f};
                 float output_max{2.223f};
@@ -497,8 +514,8 @@ struct GimbalConfig
             // pitch 变形角度环 PID，输出为参考角速度。
             struct AnglePid
             {
-                float kp{18.0f};
-                float ki{1.0f};
+                float kp{20.0f};
+                float ki{0.0f};
                 float kd{0.0f};
                 float output_max_radps{26.179938780f};
                 float output_min_radps{-26.179938780f};
@@ -519,6 +536,18 @@ struct GimbalConfig
 
 inline constexpr GimbalConfig gimbal{};
 
+static_assert(gimbal.vision.fire_gate.yaw_enter_rad > 0.0f &&
+                  gimbal.vision.fire_gate.yaw_enter_rad < gimbal.vision.fire_gate.yaw_exit_rad &&
+                  gimbal.vision.fire_gate.pitch_enter_rad > 0.0f &&
+                  gimbal.vision.fire_gate.pitch_enter_rad < gimbal.vision.fire_gate.pitch_exit_rad,
+              "VISION fire gate exit thresholds must exceed positive enter thresholds");
+static_assert(gimbal.vision.fire_gate.stable_hold_ms > 0U &&
+                  gimbal.vision.fire_gate.feedback_timeout_ms > 0U &&
+                  gimbal.vision.fire_gate.status_timeout_ms > 0U,
+              "VISION fire gate hold and timeouts must be non-zero");
+static_assert(gimbal.sentry.roll_enter_error_rad > 0.0f &&
+                  gimbal.sentry.roll_enter_error_rad < gimbal.sentry.roll_exit_error_rad,
+              "SENTRY roll exit threshold must exceed the positive enter threshold");
 static_assert(gimbal.sentry.yaw.min_rad < gimbal.sentry.yaw.max_rad, "SENTRY yaw limits must be ordered");
 static_assert(gimbal.sentry.pitch.min_rad < gimbal.sentry.pitch.max_rad, "SENTRY pitch limits must be ordered");
 static_assert(gimbal.transform.stable_cycles > 0U && gimbal.transform.phase_timeout_ms > 0U,

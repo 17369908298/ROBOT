@@ -793,7 +793,7 @@
             <File>
               <FileName>boards_communication.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\communication\boards_communication.cpp</FilePath>
+              <FilePath>..\..\shared\boards_communication.cpp</FilePath>
             </File>
             <File>
               <FileName>host_communication.cpp</FileName>
@@ -813,12 +813,12 @@
             <File>
               <FileName>state_watch.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\user\core\BSP\Common\StateWatch\state_watch.cpp</FilePath>
+              <FilePath>..\..\CHASSIS\user\core\BSP\Common\StateWatch\state_watch.cpp</FilePath>
             </File>
             <File>
               <FileName>DT7.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\user\core\BSP\RemoteControl\DT7.cpp</FilePath>
+              <FilePath>..\..\CHASSIS\user\core\BSP\RemoteControl\DT7.cpp</FilePath>
             </File>
           </Files>
         </Group>
@@ -858,7 +858,7 @@
             <File>
               <FileName>uart_device_impl.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\user\core\HAL\UART\impl\uart_device_impl.cpp</FilePath>
+              <FilePath>..\..\CHASSIS\user\core\HAL\UART\impl\uart_device_impl.cpp</FilePath>
             </File>
           </Files>
         </Group>

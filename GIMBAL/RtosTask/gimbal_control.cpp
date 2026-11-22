@@ -15,6 +15,55 @@ using OnmiGimbalDetail::DT7_CH_S1;
 using OnmiGimbalDetail::DT7_CH_S2;
 using OnmiGimbalDetail::shortest_setpoint_rad;
 
+struct GimbalTransformTuning
+{
+    decltype(cfg::gimbal.transform.base) base = cfg::gimbal.transform.base;
+    decltype(cfg::gimbal.transform.yaw) yaw = cfg::gimbal.transform.yaw;
+    decltype(cfg::gimbal.transform.pitch) pitch = cfg::gimbal.transform.pitch;
+    decltype(cfg::gimbal.roll.impedance) roll = cfg::gimbal.roll.impedance;
+
+    struct Reference
+    {
+        float base_rad{cfg::gimbal.transform.reference.base_rad};
+        float yaw_rad{cfg::gimbal.transform.reference.yaw_rad};
+        float pitch_rad{cfg::gimbal.transform.reference.pitch_rad};
+        float roll_rad{cfg::gimbal.roll.reference.transform_rad};
+    } reference{};
+};
+
+// Keil Watch 2 修改 RAM 中的参数，控制任务从 volatile 字段读取。
+volatile GimbalTransformTuning gimbal_tf_tuning{};
+
+namespace
+{
+float valid_tuning_value(float value, float fallback, float min_value, float max_value)
+{
+    return value >= min_value && value <= max_value ? value : fallback;
+}
+
+float read_tf_target_rad(float value, float fallback)
+{
+    return Sentry::Utils::normalize_angle_0_2pi(std::isfinite(value) ? value : fallback);
+}
+
+void apply_tf_pid_config(ALG::Omni::TimePid &pid, const ALG::Omni::TimePid::Config &config)
+{
+    if (std::isfinite(config.kp) && std::isfinite(config.ki) && std::isfinite(config.kd) &&
+        std::isfinite(config.output_min) && config.output_min <= 0.0f &&
+        std::isfinite(config.output_max) && config.output_max >= 0.0f &&
+        std::isfinite(config.integral_max) && config.integral_max >= 0.0f)
+    {
+        pid.set_config(config);
+    }
+}
+
+template <typename Config> void apply_tf_pid_config(ALG::Omni::TimePid &pid, const volatile Config &config)
+{
+    apply_tf_pid_config(pid, {config.kp, config.ki, config.kd, config.output_max, config.output_min,
+                              config.integral_max});
+}
+} // namespace
+
 bool GimbalCtrl::update_control(OnmiGimbalMode mode, const Sentry::IMUData &main_imu,
                                 const Sentry::IMUData &base_imu,
                                 const Sentry::MotorFeedback &yaw_fb)
@@ -288,6 +337,7 @@ float GimbalCtrl::measured_yaw_torque_nm(const Sentry::MotorFeedback &yaw_fb) co
 
 void GimbalCtrl::reset_pids(bool reset_roll)
 {
+    tracking_.gate.reset();
     base_.speed_pid.reset();
     sentry_.ready = false;
     sentry_.since_ms = 0U;
@@ -304,9 +354,6 @@ void GimbalCtrl::reset_pids(bool reset_roll)
     pitch_.angle_pid.reset();
     pitch_.sentry_angle_pid.reset();
     reset_tf_ctrls();
-    tf_.base.planner.reset();
-    tf_.yaw.planner.reset();
-    tf_.pitch.planner.reset();
     if (reset_roll)
         reset_roll_reference(roll_.motor.angle_rad);
     reset_control_outputs();
@@ -315,7 +362,7 @@ void GimbalCtrl::reset_pids(bool reset_roll)
 void GimbalCtrl::set_roll_mode_ref(OnmiGimbalMode mode)
 {
     roll_.ref_rad =
-        mode == OnmiGimbalMode::TRANSFORM ? cfg::gimbal.roll.reference.transform_rad : cfg::gimbal.roll.reference.normal_rad;
+        mode == OnmiGimbalMode::TRANSFORM ? tf_.roll_ref_rad : cfg::gimbal.roll.reference.normal_rad;
 }
 
 void GimbalCtrl::configure_roll_ctrl()
@@ -330,8 +377,21 @@ void GimbalCtrl::configure_roll_ctrl()
 
 void GimbalCtrl::update_roll_control(bool update_reference, float hold_ref_rad)
 {
-
     const bool normal_owner = tf_.fsm.state() == App::Onmi::TransformState::NORMAL;
+    const auto &defaults = cfg::gimbal.roll.impedance;
+    auto control_config = roll_.ctrl.config();
+    control_config.stiffness_nm_per_rad = normal_owner
+        ? defaults.stiffness_nm_per_rad
+        : valid_tuning_value(gimbal_tf_tuning.roll.stiffness_nm_per_rad, defaults.stiffness_nm_per_rad, 0.0f, 500.0f);
+    control_config.damping_nms_rad = normal_owner
+        ? defaults.damping_nms_rad
+        : valid_tuning_value(gimbal_tf_tuning.roll.damping_nms_rad, defaults.damping_nms_rad,
+                             std::numeric_limits<float>::min(), 5.0f);
+    control_config.tf_stiffness_ratio = normal_owner
+        ? defaults.transform_ratio
+        : valid_tuning_value(gimbal_tf_tuning.roll.transform_ratio, defaults.transform_ratio, 0.0f, 1.0f);
+    roll_.ctrl.configure(control_config);
+
     const auto &result =
         roll_.ctrl.update(update_reference ? roll_.ref_rad : hold_ref_rad, roll_.motor.angle_rad,
                           roll_.motor.speed_radps, roll_.fb_ms, DT_SEC, normal_owner);
@@ -369,6 +429,12 @@ void GimbalCtrl::Update()
     const auto in = readInputs();
 
     updateFeedback(in);
+
+    // 使用本轮原始视觉位置和原始 IMU 角度，避免保留的旧反馈或插值参考产生假到位。
+    tracking_.status.vision = in.vision;
+    tracking_.status.yaw_error_rad = angle_error_rad(in.vision.yaw_angle_rad, read_yaw_rad(in.mainImu));
+    tracking_.status.pitch_error_rad = in.vision.pitch_angle_rad - read_pitch_rad(in.mainImu);
+    tracking_.feedback_ms = in.mainImu.timestamp;
 
     update_vis_yaw_alignment();
 
@@ -417,7 +483,7 @@ void GimbalCtrl::Update()
 
     state_.fsm.update(select_mode(in.remote, state_.main_imu_online, state_.base_imu_online,
                                   state_.motors_ready, state_.fb_stale, vis_mode_request_locked,
-                                  tf_requested, tf_.fsm.owns_control(), normal_roll_ref_reached()),
+                                  tf_requested, tf_.fsm.owns_control(), sentry_roll_angle_in_range()),
                       in.nowMs);
     const bool mode_switched = state_.fsm.changed();
     const OnmiGimbalMode previous_mode = state_.fsm.previous_state();
@@ -566,7 +632,7 @@ void GimbalCtrl::Update()
         if (tf_.fsm.owns_control())
         {
 
-            if (!update_tf_control(in.bigFb, in.smallFb, in.pitchFb))
+            if (!update_tf_control(in.smallFb, in.pitchFb))
             {
                 stop_after_gate_failure();
                 return;
@@ -614,7 +680,7 @@ void GimbalCtrl::Update()
 
         if (!system_safe_for_tf_output(in.remote, state_.motors_ready, state_.fb_stale) ||
             tf_.fsm.faulted() || !tf_.fsm.owns_control() ||
-            !update_tf_control(in.bigFb, in.smallFb, in.pitchFb))
+            !update_tf_control(in.smallFb, in.pitchFb))
         {
             publish_stop();
             state_.stopped = true;
@@ -764,10 +830,19 @@ bool GimbalCtrl::update_vis_mode_debounce(bool raw_mode_active, std::uint32_t no
     return true;
 }
 
+bool GimbalCtrl::sentry_roll_angle_in_range() const
+{
+    const float limit_rad = mode() == OnmiGimbalMode::SENTRY
+                                ? cfg::gimbal.sentry.roll_exit_error_rad
+                                : cfg::gimbal.sentry.roll_enter_error_rad;
+    const float error_rad = angle_error_rad(cfg::gimbal.roll.reference.normal_rad, roll_.motor.angle_rad);
+    return std::fabs(error_rad) <= limit_rad;
+}
+
 OnmiGimbalMode GimbalCtrl::select_mode(const Sentry::RemoteData &remote, bool main_imu_online,
                                        bool base_imu_online, bool motors_ready, bool fb_stale,
                                        bool vis_ref_locked, bool tf_requested,
-                                       bool tf_control_active, bool normal_roll_ready)
+                                       bool tf_control_active, bool sentry_roll_ready)
 {
     const std::uint8_t s1 = dt7_switch(remote, DT7_CH_S1);
     const std::uint8_t s2 = dt7_switch(remote, DT7_CH_S2);
@@ -800,7 +875,7 @@ OnmiGimbalMode GimbalCtrl::select_mode(const Sentry::RemoteData &remote, bool ma
         {
             return OnmiGimbalMode::VISION;
         }
-        return normal_roll_ready ? OnmiGimbalMode::SENTRY : OnmiGimbalMode::MANUAL;
+        return sentry_roll_ready ? OnmiGimbalMode::SENTRY : OnmiGimbalMode::MANUAL;
     };
 
     if (tf_control_active)
@@ -987,6 +1062,10 @@ bool GimbalCtrl::Init()
 
 void GimbalCtrl::configure_gimbal_ctrls()
 {
+    const auto &fire_gate = cfg::gimbal.vision.fire_gate;
+    tracking_.gate.configure({fire_gate.yaw_enter_rad, fire_gate.yaw_exit_rad,
+                              fire_gate.pitch_enter_rad, fire_gate.pitch_exit_rad,
+                              fire_gate.stable_hold_ms, fire_gate.status_timeout_ms});
     vision_.angle_hold.configure({
 
         cfg::gimbal.vision.base.hold.kp_radps_per_rad,
@@ -1026,12 +1105,6 @@ void GimbalCtrl::configure_gimbal_ctrls()
         cfg::gimbal.base.speed_pid.kp, cfg::gimbal.base.speed_pid.ki, cfg::gimbal.base.speed_pid.kd,
         cfg::gimbal.base.speed_pid.output_max, cfg::gimbal.base.speed_pid.output_min,
         cfg::gimbal.base.speed_pid.integral_max});
-    tf_.base.angle_pid.set_config(ALG::Omni::TimePid::Config{
-        cfg::gimbal.transform.base.angle_pid.kp, cfg::gimbal.transform.base.angle_pid.ki, cfg::gimbal.transform.base.angle_pid.kd,
-        cfg::gimbal.transform.base.angle_pid.output_max, cfg::gimbal.transform.base.angle_pid.output_min,
-        cfg::gimbal.transform.base.angle_pid.integral_max});
-    tf_.base.angle_pid.set_integral_separation(cfg::gimbal.transform.base.angle_pid.integral_separation_rad,
-                                               cfg::gimbal.transform.base.angle_pid.integral_reset_rad);
     yaw_.angle_pid.set_config(
         ALG::Omni::TimePid::Config{cfg::gimbal.yaw.angle_pid.kp, cfg::gimbal.yaw.angle_pid.ki,
                                    cfg::gimbal.yaw.angle_pid.kd, cfg::gimbal.yaw.angle_pid.output_max,
@@ -1042,16 +1115,6 @@ void GimbalCtrl::configure_gimbal_ctrls()
         ALG::Omni::TimePid::Config{cfg::gimbal.yaw.speed_pid.kp, cfg::gimbal.yaw.speed_pid.ki,
                                    cfg::gimbal.yaw.speed_pid.kd, cfg::gimbal.yaw.motor.max_torque_nm(),
                                    -cfg::gimbal.yaw.motor.max_torque_nm(), cfg::gimbal.yaw.speed_pid.integral_max});
-    tf_.yaw.angle_pid.set_config(ALG::Omni::TimePid::Config{
-        cfg::gimbal.transform.yaw.angle_pid.kp, cfg::gimbal.transform.yaw.angle_pid.ki, cfg::gimbal.transform.yaw.angle_pid.kd,
-        cfg::gimbal.transform.yaw.angle_pid.output_max, cfg::gimbal.transform.yaw.angle_pid.output_min,
-        cfg::gimbal.transform.yaw.angle_pid.integral_max});
-    tf_.yaw.angle_pid.set_integral_separation(cfg::gimbal.transform.yaw.angle_pid.integral_separation_rad,
-                                              cfg::gimbal.transform.yaw.angle_pid.integral_reset_rad);
-    tf_.yaw_speed_pid.set_config(ALG::Omni::TimePid::Config{
-        cfg::gimbal.transform.yaw.speed_pid.kp, cfg::gimbal.transform.yaw.speed_pid.ki, cfg::gimbal.transform.yaw.speed_pid.kd,
-        cfg::gimbal.transform.yaw.speed_pid.output_max, cfg::gimbal.transform.yaw.speed_pid.output_min,
-        cfg::gimbal.transform.yaw.speed_pid.integral_max});
     yaw_.sentry_angle_pid.set_config(ALG::Omni::TimePid::Config{
         cfg::gimbal.sentry.yaw.encoder_angle_pid.kp, cfg::gimbal.sentry.yaw.encoder_angle_pid.ki,
         cfg::gimbal.sentry.yaw.encoder_angle_pid.kd, cfg::gimbal.sentry.yaw.encoder_angle_pid.output_max,
@@ -1071,12 +1134,6 @@ void GimbalCtrl::configure_gimbal_ctrls()
         cfg::gimbal.pitch.angle_pid.integral_max_rad_s});
     pitch_.angle_pid.set_integral_separation(cfg::gimbal.pitch.angle_pid.integral_separation_rad,
                                              cfg::gimbal.pitch.angle_pid.integral_reset_rad);
-    tf_.pitch.angle_pid.set_config(ALG::Omni::TimePid::Config{
-        cfg::gimbal.transform.pitch.angle_pid.kp, cfg::gimbal.transform.pitch.angle_pid.ki, cfg::gimbal.transform.pitch.angle_pid.kd,
-        cfg::gimbal.transform.pitch.angle_pid.output_max_radps, cfg::gimbal.transform.pitch.angle_pid.output_min_radps,
-        cfg::gimbal.transform.pitch.angle_pid.integral_max_rad_s});
-    tf_.pitch.angle_pid.set_integral_separation(cfg::gimbal.transform.pitch.angle_pid.integral_separation_rad,
-                                                cfg::gimbal.transform.pitch.angle_pid.integral_reset_rad);
     pitch_.sentry_angle_pid.set_config(ALG::Omni::TimePid::Config{
         cfg::gimbal.sentry.pitch.encoder_angle_pid.kp, cfg::gimbal.sentry.pitch.encoder_angle_pid.ki,
         cfg::gimbal.sentry.pitch.encoder_angle_pid.kd,
@@ -1086,6 +1143,7 @@ void GimbalCtrl::configure_gimbal_ctrls()
     pitch_.sentry_angle_pid.set_integral_separation(
         cfg::gimbal.sentry.pitch.encoder_angle_pid.integral_separation_rad,
         cfg::gimbal.sentry.pitch.encoder_angle_pid.integral_reset_rad);
+    update_tf_tuning();
     configure_roll_ctrl();
     manual_.planner.configure(
         {cfg::gimbal.base.manual.speed_limit_radps, cfg::gimbal.base.manual.accel_limit_radps2,
@@ -1131,12 +1189,6 @@ void GimbalCtrl::configure_gimbal_ctrls()
                               cfg::gimbal.yaw.auto_control.reference_speed_deadband_rad_s});
     yaw_.torque_converter.configure({cfg::gimbal.yaw.motor.torque_constant_nm_per_a, cfg::gimbal.yaw.motor.current_max_a,
                                      cfg::gimbal.yaw.motor.command_max_raw, cfg::gimbal.yaw.motor.command_limit_raw});
-    const ALG::Omni::SCurveVelocityPlanning::Config tf_axis_plan_config{
-        cfg::gimbal.roll.trajectory.max_speed_radps, cfg::gimbal.roll.trajectory.max_accel_radps2,
-        cfg::gimbal.roll.trajectory.max_accel_radps2, cfg::gimbal.roll.trajectory.max_jerk_radps3};
-    tf_.base.planner.configure(tf_axis_plan_config);
-    tf_.yaw.planner.configure(tf_axis_plan_config);
-    tf_.pitch.planner.configure(tf_axis_plan_config);
 }
 
 bool GimbalCtrl::set_ref(OnmiGimbalMode mode, const Sentry::RemoteData &remote,
@@ -1501,66 +1553,65 @@ bool GimbalCtrl::sync_refs_from_imus(const Sentry::IMUData &main_imu,
     return true;
 }
 
-void GimbalCtrl::AxisPath::reset(float angle_rad, float target_rad)
+namespace
 {
-    start_rad = angle_rad;
-    delta_rad = GimbalCtrl::angle_error_rad(target_rad, start_rad);
-    path_rad = 0.0f;
-    ref_rad = start_rad;
-}
-
-bool GimbalCtrl::AxisPath::advance(ALG::Omni::SCurveVelocityPlanning &planner, float max_speed,
-                                   float max_accel, float max_jerk, float dt_sec)
+bool plan_tf_axis(ALG::Omni::RollPositionTrajectory &trajectory, float start_rad, float target_rad)
 {
-    const float distance = std::fabs(delta_rad);
-    if (!std::isfinite(start_rad) || !std::isfinite(delta_rad) || !std::isfinite(path_rad) ||
-        !std::isfinite(max_speed) || !std::isfinite(max_accel) || !std::isfinite(max_jerk) ||
-        !std::isfinite(dt_sec) || dt_sec <= 0.0f || max_speed <= 0.0f || max_accel <= 0.0f ||
-        max_jerk <= 0.0f)
+    if (!std::isfinite(start_rad))
     {
         return false;
     }
-    if (distance <= 0.0000174533f)
-    {
-        path_rad = 0.0f;
-        planner.reset(0.0f);
-        ref_rad = Sentry::Utils::normalize_angle_0_2pi(start_rad);
-        return true;
-    }
-    path_rad = std::fmin(std::fmax(path_rad, 0.0f), distance);
-    const float remaining = distance - path_rad;
-    if (remaining <= 0.0000174533f)
-    {
-        path_rad = distance;
-        planner.reset(0.0f);
-        ref_rad = Sentry::Utils::normalize_angle_0_2pi(start_rad + delta_rad);
-        return true;
-    }
+    const auto &limits = cfg::gimbal.roll.trajectory;
+    trajectory.reset(start_rad);
+    return trajectory.plan(target_rad, limits.max_speed_radps, limits.max_accel_radps2,
+                           limits.max_jerk_radps3);
+}
+} // namespace
 
-    const float braking_speed = std::sqrt(2.0f * max_accel * remaining);
-    const float desired_speed = std::fmin(max_speed, braking_speed);
-    const float planned_speed = planner.update(desired_speed, dt_sec);
-    path_rad = std::fmin(distance, path_rad + std::fmax(0.0f, planned_speed * dt_sec));
-    ref_rad = Sentry::Utils::normalize_angle_0_2pi(start_rad + delta_rad * (path_rad / distance));
-    if (path_rad >= distance - 0.0000174533f)
-    {
-        path_rad = distance;
-        planner.reset(0.0f);
-        ref_rad = Sentry::Utils::normalize_angle_0_2pi(start_rad + delta_rad);
-        return true;
-    }
-    return false;
+void GimbalCtrl::AlignPath::advance()
+{
+    base.update(DT_SEC);
+    yaw.update(DT_SEC);
+    pitch.update(DT_SEC);
 }
 
-bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
-                                   const Sentry::MotorFeedback &yaw_fb,
+void GimbalCtrl::TransformAxis::update_integral_separation(float enter_rad, float reset_rad)
+{
+    if (!std::isfinite(enter_rad) || enter_rad < 0.0f || !std::isfinite(reset_rad) || reset_rad < 0.0f ||
+        (enter_rad == integral_separation_rad && reset_rad == integral_reset_rad))
+    {
+        return;
+    }
+    angle_pid.set_integral_separation(enter_rad, reset_rad);
+    integral_separation_rad = enter_rad;
+    integral_reset_rad = reset_rad;
+}
+
+void GimbalCtrl::update_tf_tuning()
+{
+    const auto &base = gimbal_tf_tuning.base;
+    const auto &yaw = gimbal_tf_tuning.yaw;
+    const auto &pitch = gimbal_tf_tuning.pitch;
+    apply_tf_pid_config(tf_.base.angle_pid, base.angle_pid);
+    apply_tf_pid_config(tf_.yaw.angle_pid, yaw.angle_pid);
+    apply_tf_pid_config(tf_.yaw_speed_pid, yaw.speed_pid);
+    apply_tf_pid_config(tf_.pitch.angle_pid, {pitch.angle_pid.kp, pitch.angle_pid.ki, pitch.angle_pid.kd,
+                                             pitch.angle_pid.output_max_radps, pitch.angle_pid.output_min_radps,
+                                             pitch.angle_pid.integral_max_rad_s});
+    tf_.base.update_integral_separation(base.angle_pid.integral_separation_rad, base.angle_pid.integral_reset_rad);
+    tf_.yaw.update_integral_separation(yaw.angle_pid.integral_separation_rad, yaw.angle_pid.integral_reset_rad);
+    tf_.pitch.update_integral_separation(pitch.angle_pid.integral_separation_rad, pitch.angle_pid.integral_reset_rad);
+}
+
+bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &yaw_fb,
                                    const Sentry::MotorFeedback &pitch_fb)
 {
     const auto state = tf_.fsm.state();
+    const auto &base_motor = base_.motor;
 
-    if (!tf_.fsm.owns_control() || !std::isfinite(base_.motor.angle_rad) ||
+    if (!tf_.fsm.owns_control() || !std::isfinite(base_motor.angle_rad) || !std::isfinite(base_motor.speed_radps) ||
         !std::isfinite(yaw_.motor.angle_rad) || !std::isfinite(pitch_.motor.angle_rad) ||
-        !std::isfinite(roll_.motor.angle_rad) || !std::isfinite(base_fb.output_speed_radps) ||
+        !std::isfinite(roll_.motor.angle_rad) ||
         !std::isfinite(yaw_fb.output_speed_radps) || !std::isfinite(pitch_fb.output_speed_radps))
     {
         reset_control_outputs();
@@ -1574,9 +1625,9 @@ bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
     switch (state)
     {
     case App::Onmi::TransformState::TO_TRANSFORM_ALIGN:
-        base_ref_rad = tf_.align.base.ref_rad;
-        yaw_ref_rad = tf_.align.yaw.ref_rad;
-        pitch_ref_rad = tf_.align.pitch.ref_rad;
+        base_ref_rad = tf_.align.base.state().position;
+        yaw_ref_rad = tf_.align.yaw.state().position;
+        pitch_ref_rad = tf_.align.pitch.state().position;
         break;
 
     case App::Onmi::TransformState::TO_TRANSFORM_ROLL:
@@ -1593,9 +1644,9 @@ bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
         if (tf_.from_stop && (state == App::Onmi::TransformState::TO_NORMAL_SYNC ||
                               state == App::Onmi::TransformState::TO_NORMAL_ALIGN))
         {
-            base_ref_rad = tf_.recovery.base.ref_rad;
-            yaw_ref_rad = tf_.recovery.yaw.ref_rad;
-            pitch_ref_rad = tf_.recovery.pitch.ref_rad;
+            base_ref_rad = tf_.recovery.base.state().position;
+            yaw_ref_rad = tf_.recovery.yaw.state().position;
+            pitch_ref_rad = tf_.recovery.pitch.state().position;
         }
         break;
 
@@ -1608,7 +1659,7 @@ bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
     if (state == App::Onmi::TransformState::TO_TRANSFORM_ROLL ||
         state == App::Onmi::TransformState::TRANSFORM)
     {
-        roll_.ref_rad = cfg::gimbal.roll.reference.transform_rad;
+        roll_.ref_rad = tf_.roll_ref_rad;
     }
     else if (state == App::Onmi::TransformState::TO_NORMAL_ROLL)
     {
@@ -1624,18 +1675,14 @@ bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
         roll_.ref_rad = tf_.recovery.roll_hold_rad;
     }
 
-    const float base_setpoint_rad = shortest_setpoint_rad(base_ref_rad, base_.motor.angle_rad);
-    const float base_fb_rad = base_.motor.angle_rad;
-    const float base_angle_output_radps =
-        clamp_speed_radps(tf_.base.angle_pid.update(base_setpoint_rad, base_fb_rad, DT_SEC),
-                          cfg::gimbal.base.mit.speed_limit_radps);
-    const float base_speed_ref_radps = base_angle_output_radps;
-    const float base_speed_fb_radps = base_fb.output_speed_radps;
-    base_.loop.raw_ref_radps = base_speed_ref_radps;
-    base_.loop.ref_radps = base_speed_ref_radps;
-    base_.loop.speed_radps = base_speed_fb_radps;
-
+    update_tf_tuning();
+    tf_.base_planned_rad = base_ref_rad;
+    const float base_setpoint_rad = shortest_setpoint_rad(base_ref_rad, base_motor.angle_rad);
+    base_.loop.raw_ref_radps = tf_.base.angle_pid.update(base_setpoint_rad, base_motor.angle_rad, DT_SEC);
+    base_.loop.ref_radps = clamp_speed_radps(base_.loop.raw_ref_radps, cfg::gimbal.base.mit.speed_limit_radps);
+    base_.loop.speed_radps = base_motor.speed_radps;
     base_.loop.torque_nm = 0.0f;
+    base_.loop.dist_torque_nm = 0.0f;
 
     const float yaw_setpoint_rad = shortest_setpoint_rad(yaw_ref_rad, yaw_.motor.angle_rad);
     const float yaw_fb_rad = yaw_.motor.angle_rad;
@@ -1671,10 +1718,8 @@ bool GimbalCtrl::update_tf_control(const Sentry::MotorFeedback &base_fb,
                         roll_hold_ref_rad);
 
     dual_.state.reaction_nm = 0.0f;
-    base_.loop.torque_nm =
-        clamp_by_abs_limit(base_.loop.torque_nm, cfg::gimbal.base.mit.torque_limit_nm);
 
-    return roll_.ctrl.output().valid && std::isfinite(base_.loop.torque_nm) &&
+    return roll_.ctrl.output().valid && std::isfinite(base_.loop.ref_radps) &&
            std::isfinite(yaw_.loop.cmd_raw) && std::isfinite(pitch_.loop.ref_radps) &&
            std::isfinite(roll_.ref_radps) && std::isfinite(pitch_.loop.gravity_nm) &&
            std::isfinite(roll_.ctrl.output().gravity_torque_nm) &&
@@ -1715,12 +1760,12 @@ void GimbalCtrl::update_tf_fsm(bool tf_requested, bool normal_recovery_requested
                           state == App::Onmi::TransformState::TO_NORMAL_ALIGN);
     if (state == App::Onmi::TransformState::TO_TRANSFORM_ALIGN && state_.chassis_locked)
     {
-        update_tf_alignment_references();
+        tf_.align.advance();
     }
     if (updating_normal_recovery_references && state_.chassis_locked)
     {
-        update_normal_recovery_references();
-        normal_recovery_ready = tf_.recovery.done;
+        tf_.recovery.advance();
+        normal_recovery_ready = tf_.recovery.done();
     }
 
     const bool checking_tf_axes = state == App::Onmi::TransformState::TO_TRANSFORM_ALIGN;
@@ -1730,11 +1775,11 @@ void GimbalCtrl::update_tf_fsm(bool tf_requested, bool normal_recovery_requested
     bool reached = false;
     if (checking_tf_axes)
     {
-        reached = tf_axes_reached();
+        reached = state_.chassis_locked && tf_.align.done() && tf_axes_reached();
     }
     else if (checking_tf_roll)
     {
-        reached = tf_roll_reached(cfg::gimbal.roll.reference.transform_rad);
+        reached = tf_roll_reached(tf_.roll_ref_rad);
     }
     else if (checking_normal_roll)
     {
@@ -1779,25 +1824,26 @@ void GimbalCtrl::update_tf_fsm(bool tf_requested, bool normal_recovery_requested
     {
     case App::Onmi::TransformState::TO_TRANSFORM_ALIGN:
 
-        capture_tf_refs();
+        if (!capture_tf_refs())
+        {
+            tf_.fsm.force_fault();
+        }
         reset_tf_ctrls();
         break;
 
     case App::Onmi::TransformState::TO_TRANSFORM_ROLL:
-        roll_.ref_rad = cfg::gimbal.roll.reference.transform_rad;
-
-        break;
-
     case App::Onmi::TransformState::TRANSFORM:
-        roll_.ref_rad = cfg::gimbal.roll.reference.transform_rad;
-
+        roll_.ref_rad = tf_.roll_ref_rad;
         break;
 
     case App::Onmi::TransformState::TO_NORMAL_SYNC:
 
         if (normal_recovery_requested)
         {
-            capture_normal_recovery_refs();
+            if (!capture_normal_recovery_refs())
+            {
+                tf_.fsm.force_fault();
+            }
         }
         else
         {
@@ -1868,43 +1914,21 @@ void GimbalCtrl::publish_motion_gate()
     sentry_data.motion_gate.publish(gate);
 }
 
-void GimbalCtrl::capture_tf_refs()
+bool GimbalCtrl::capture_tf_refs()
 {
-
-    tf_.base.ref_rad = Sentry::Utils::normalize_angle_0_2pi(cfg::gimbal.transform.reference.base_rad);
-    tf_.yaw.ref_rad = Sentry::Utils::normalize_angle_0_2pi(cfg::gimbal.transform.reference.yaw_rad);
-    tf_.pitch.ref_rad = Sentry::Utils::normalize_angle_0_2pi(cfg::gimbal.transform.reference.pitch_rad);
+    // 变形开始时读取 Watch 目标，规划、保持和到位判定共用这次读取的角度。
+    const auto &target = gimbal_tf_tuning.reference;
+    const auto &defaults = cfg::gimbal.transform.reference;
+    tf_.base.ref_rad = read_tf_target_rad(target.base_rad, defaults.base_rad);
+    tf_.yaw.ref_rad = read_tf_target_rad(target.yaw_rad, defaults.yaw_rad);
+    tf_.pitch.ref_rad = read_tf_target_rad(target.pitch_rad, defaults.pitch_rad);
+    tf_.roll_ref_rad = read_tf_target_rad(target.roll_rad, cfg::gimbal.roll.reference.transform_rad);
     roll_.ref_rad = cfg::gimbal.roll.reference.normal_rad;
 
     tf_.align.roll_hold_rad = roll_.motor.angle_rad;
-    tf_.align.base.reset(base_.motor.angle_rad, tf_.base.ref_rad);
-    tf_.align.yaw.reset(yaw_.motor.angle_rad, tf_.yaw.ref_rad);
-    tf_.align.pitch.reset(pitch_.motor.angle_rad, tf_.pitch.ref_rad);
-    tf_.align.done = std::fabs(tf_.align.base.delta_rad) <= 0.0000174533f &&
-                     std::fabs(tf_.align.yaw.delta_rad) <= 0.0000174533f &&
-                     std::fabs(tf_.align.pitch.delta_rad) <= 0.0000174533f;
-    tf_.base.planner.reset(0.0f);
-    tf_.yaw.planner.reset(0.0f);
-    tf_.pitch.planner.reset(0.0f);
-}
-
-void GimbalCtrl::update_tf_alignment_references()
-{
-    if (tf_.align.done)
-    {
-        return;
-    }
-
-    const float max_speed = cfg::gimbal.roll.trajectory.max_speed_radps;
-    const float max_accel = cfg::gimbal.roll.trajectory.max_accel_radps2;
-    const float max_jerk = cfg::gimbal.roll.trajectory.max_jerk_radps3;
-    const bool base_done =
-        tf_.align.base.advance(tf_.base.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    const bool yaw_done =
-        tf_.align.yaw.advance(tf_.yaw.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    const bool pitch_done =
-        tf_.align.pitch.advance(tf_.pitch.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    tf_.align.done = base_done && yaw_done && pitch_done;
+    return plan_tf_axis(tf_.align.base, base_.motor.angle_rad, tf_.base.ref_rad) &&
+           plan_tf_axis(tf_.align.yaw, yaw_.motor.angle_rad, tf_.yaw.ref_rad) &&
+           plan_tf_axis(tf_.align.pitch, pitch_.motor.angle_rad, tf_.pitch.ref_rad);
 }
 
 void GimbalCtrl::capture_normal_sync_refs()
@@ -1917,45 +1941,16 @@ void GimbalCtrl::capture_normal_sync_refs()
     tf_.from_stop = false;
 }
 
-void GimbalCtrl::capture_normal_recovery_refs()
+bool GimbalCtrl::capture_normal_recovery_refs()
 {
-
-    capture_tf_refs();
-
     tf_.sync.base_rad = base_.motor.angle_rad;
-    tf_.sync.yaw_rad = tf_.yaw.ref_rad;
-    tf_.sync.pitch_rad = tf_.pitch.ref_rad;
+    tf_.sync.yaw_rad = Sentry::Utils::normalize_angle_0_2pi(cfg::gimbal.transform.reference.yaw_rad);
+    tf_.sync.pitch_rad = Sentry::Utils::normalize_angle_0_2pi(cfg::gimbal.transform.reference.pitch_rad);
     tf_.recovery.roll_hold_rad = roll_.motor.angle_rad;
-
-    tf_.recovery.base.reset(base_.motor.angle_rad, tf_.sync.base_rad);
-    tf_.recovery.yaw.reset(yaw_.motor.angle_rad, tf_.sync.yaw_rad);
-    tf_.recovery.pitch.reset(pitch_.motor.angle_rad, tf_.sync.pitch_rad);
-    tf_.recovery.done = std::fabs(tf_.recovery.base.delta_rad) <= 0.0000174533f &&
-                        std::fabs(tf_.recovery.yaw.delta_rad) <= 0.0000174533f &&
-                        std::fabs(tf_.recovery.pitch.delta_rad) <= 0.0000174533f;
-    tf_.base.planner.reset(0.0f);
-    tf_.yaw.planner.reset(0.0f);
-    tf_.pitch.planner.reset(0.0f);
     tf_.from_stop = true;
-}
-
-void GimbalCtrl::update_normal_recovery_references()
-{
-    if (!tf_.from_stop || tf_.recovery.done)
-    {
-        return;
-    }
-
-    const float max_speed = cfg::gimbal.roll.trajectory.max_speed_radps;
-    const float max_accel = cfg::gimbal.roll.trajectory.max_accel_radps2;
-    const float max_jerk = cfg::gimbal.roll.trajectory.max_jerk_radps3;
-    const bool base_done =
-        tf_.recovery.base.advance(tf_.base.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    const bool yaw_done =
-        tf_.recovery.yaw.advance(tf_.yaw.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    const bool pitch_done =
-        tf_.recovery.pitch.advance(tf_.pitch.planner, max_speed, max_accel, max_jerk, DT_SEC);
-    tf_.recovery.done = base_done && yaw_done && pitch_done;
+    return plan_tf_axis(tf_.recovery.base, base_.motor.angle_rad, tf_.sync.base_rad) &&
+           plan_tf_axis(tf_.recovery.yaw, yaw_.motor.angle_rad, tf_.sync.yaw_rad) &&
+           plan_tf_axis(tf_.recovery.pitch, pitch_.motor.angle_rad, tf_.sync.pitch_rad);
 }
 
 bool GimbalCtrl::tf_axes_reached() const
@@ -2178,25 +2173,24 @@ void GimbalCtrl::publish_control(bool enable)
     const bool tf_dm_control = tf_.fsm.owns_control();
 
     Sentry::DMMITCommand base_cmd{};
-    base_cmd.pos_rad = 0.0f;
-    base_cmd.vel_radps =
-        enable && tf_dm_control
-            ? clamp_speed_radps(base_.loop.ref_radps, cfg::gimbal.base.mit.speed_limit_radps)
-            : 0.0f;
-    base_cmd.kp = 0.0f;
-    base_cmd.kd = tf_dm_control ? cfg::gimbal.transform.base.mit_kd : cfg::gimbal.base.mit.kd;
-    base_cmd.torque_nm =
-        enable ? clamp_by_abs_limit((tf_dm_control ? 0.0f : base_.loop.torque_nm) +
-                                        (tf_dm_control ? cfg::gimbal.base.mit.torque_offset_nm
-                                                       : cfg::gimbal.base.mit.torque_offset_nm),
-                                    tf_dm_control ? cfg::gimbal.base.mit.torque_limit_nm
-                                                  : cfg::gimbal.base.mit.torque_limit_nm)
-               : 0.0f;
+    if (enable && tf_dm_control)
+    {
+        // 变形阶段的速度环在电机驱动内闭合。
+        base_cmd.vel_radps = base_.loop.ref_radps;
+        base_cmd.kd = valid_tuning_value(gimbal_tf_tuning.base.mit_kd, cfg::gimbal.transform.base.mit_kd, 0.0f, 5.0f);
+    }
+    else if (!tf_dm_control)
+    {
+        const auto &mit = cfg::gimbal.base.mit;
+        base_cmd.kd = mit.kd;
+        if (enable)
+        {
+            base_cmd.torque_nm = clamp_by_abs_limit(base_.loop.torque_nm + mit.torque_offset_nm, mit.torque_limit_nm);
+        }
+    }
     base_cmd.enable = enable;
     base_cmd.timestamp = now;
-    {
-        sentry_data.base_mit.publish(base_cmd);
-    }
+    sentry_data.base_mit.publish(base_cmd);
 
     Sentry::DMMITCommand pitch_cmd{};
     pitch_cmd.pos_rad = 0.0f;
@@ -2206,7 +2200,9 @@ void GimbalCtrl::publish_control(bool enable)
                                                               : cfg::gimbal.pitch.mit.speed_limit_radps)
                : 0.0f;
     pitch_cmd.kp = 0.0f;
-    pitch_cmd.kd = tf_dm_control ? cfg::gimbal.transform.pitch.mit_kd : cfg::gimbal.pitch.mit.kd;
+    pitch_cmd.kd = tf_dm_control
+                       ? valid_tuning_value(gimbal_tf_tuning.pitch.mit_kd, cfg::gimbal.transform.pitch.mit_kd, 0.0f, 5.0f)
+                       : cfg::gimbal.pitch.mit.kd;
     pitch_cmd.torque_nm =
         enable ? clamp_by_abs_limit(pitch_.loop.gravity_nm +
                                         (tf_dm_control ? cfg::gimbal.pitch.mit.torque_offset_nm
@@ -2240,9 +2236,6 @@ void GimbalCtrl::publish_control(bool enable)
     roll_.ctrl.set_applied_command(roll_cmd.vel_radps, roll_cmd.kd, roll_cmd.torque_nm,
                                    roll_output.gravity_torque_nm, enable && roll_output.valid);
 
-    {
-        sentry_data.base_cmd.publish(Sentry::MotorCommand{0, enable});
-    }
     const std::int16_t yaw_final_command = enable ? yaw_.loop.cmd_raw : 0;
     {
         sentry_data.yaw_cmd.publish(Sentry::MotorCommand{yaw_final_command, enable});
@@ -2259,12 +2252,45 @@ void GimbalCtrl::publish_control(bool enable)
         sentry_data.roll_cmd.publish(Sentry::MotorCommand{0, enable});
     }
 
-    const bool tf_fb = tf_.fsm.owns_control();
-    const float gate_speed = tf_fb ? base_.motor.speed_radps : base_.loop.speed_radps;
+    const float gate_speed = tf_dm_control ? base_.motor.speed_radps : base_.loop.speed_radps;
     const App::Onmi::GimbalMotionStatus motionStatus{
         std::isfinite(gate_speed) ? gate_speed : 0.0f,
         std::isfinite(base_.loop.ref_radps) ? base_.loop.ref_radps : 0.0f, now};
     App::Onmi::gimbalMotionStatus.publish(motionStatus);
+    publish_vision_tracking_status(enable, now);
+}
+
+void GimbalCtrl::publish_vision_tracking_status(bool output_enabled, std::uint32_t now_ms)
+{
+    using Reason = App::Onmi::VisionTrackingBlockReason;
+    using TrackingState = ALG::Omni::PositionTrackingGate::State;
+    auto &status = tracking_.status;
+    Reason reason = Reason::NONE;
+    if (!output_enabled || state_.fsm.state() != OnmiGimbalMode::VISION ||
+        tf_.fsm.owns_control() || tf_.fsm.faulted())
+        reason = Reason::INACTIVE;
+    else if (!vis_lock_active(status.vision) ||
+             !Sentry::Time::fresh(tracking_.feedback_ms, cfg::gimbal.vision.fire_gate.feedback_timeout_ms) ||
+             !state_.main_imu_online || !state_.base_imu_online ||
+             !state_.motors_ready || state_.fb_stale || !std::isfinite(status.yaw_error_rad) ||
+             !std::isfinite(status.pitch_error_rad))
+        reason = Reason::INVALID_INPUT;
+    else if (blend_.active || vision_.base.centering)
+        reason = Reason::TRANSITION;
+
+    const auto output = tracking_.gate.update(status.yaw_error_rad, status.pitch_error_rad,
+                                              reason == Reason::NONE, now_ms);
+    status.valid = output.valid;
+    status.ready = output.state == TrackingState::READY;
+    status.state = output.state;
+    status.stable_elapsed_ms = output.stable_elapsed_ms;
+    status.timestamp = now_ms;
+    if (output.valid && output.state == TrackingState::BLOCKED)
+        reason = Reason::POSITION_ERROR;
+    else if (output.valid && output.state == TrackingState::QUALIFYING)
+        reason = Reason::CONFIRMING;
+    status.block_reason = reason;
+    App::Onmi::visionTrackingStatus.publish(status);
 }
 
 void GimbalCtrl::publish_heading(const Sentry::IMUData &base_imu)
@@ -2334,6 +2360,9 @@ unsigned GimbalCtrl::GetVofaData(float *out, bool full) const
                                : pitch_.angle_rad;
     if (!full)
     {
+        const float base_ref = transform ? tf_.base_planned_rad
+                                         : vision_.angle_hold.output().anchor_angle_rad;
+        const float base_fb = transform ? base_.motor.angle_rad : base_.angle_rad;
         const float data[] = {v.yaw_angle_rad,
                               wrap_angle_rad(yaw_fb),
                               wrap_angle_rad(yaw_.ref_rad),
@@ -2342,9 +2371,12 @@ unsigned GimbalCtrl::GetVofaData(float *out, bool full) const
                               yaw_.loop.speed_radps,
                               v.pitch_angle_rad,
                               wrap_angle_rad(pitch_fb),
-                              float(v.control_mode)}; // CH8：视觉下行原始控制标志（0/1/2）。
-        std::copy(data, data + 9, out);
-        return 9;
+                              float(v.control_mode), // CH8：视觉下行原始控制标志（0/1/2）。
+                              float(tracking_.status.ready), // CH9：位置跟踪开火门控放行标志（0/1）。
+                              wrap_angle_rad(base_ref), // CH10：Base 目标角度（rad）。
+                              wrap_angle_rad(base_fb)}; // CH11：Base 反馈角度（rad）。
+        std::copy(data, data + 12, out);
+        return 12;
     }
     const float data[] = {
         v.yaw_angle_rad,
@@ -2378,4 +2410,18 @@ unsigned GimbalCtrl::GetVofaData(float *out, bool full) const
         yaw_.torque_converter.command_to_torque_Nm(sentry_data.yaw_cmd.read().current)};
     std::copy(data, data + 29, out);
     return 29;
+}
+
+unsigned GimbalCtrl::GetTrackingVofaData(float *out) const
+{
+    // CH0/1 位置误差(rad)，CH2 状态，CH3 禁止原因，CH4 确认时间(ms)。
+    // CH5 有效，CH6 放行，CH7 视觉开火请求，CH8 拨盘电流命令(raw)。
+    const auto &status = tracking_.status;
+    const float data[] = {status.yaw_error_rad, status.pitch_error_rad,
+                          float(status.state), float(status.block_reason),
+                          float(status.stable_elapsed_ms), float(status.valid), float(status.ready),
+                          float(status.vision.should_fire()),
+                          float(sentry_data.dial_cmd.read().current)};
+    std::copy(data, data + 9, out);
+    return 9;
 }

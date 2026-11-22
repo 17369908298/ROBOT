@@ -1,7 +1,10 @@
 #include "control_task.hpp"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "iwdg.h"
+#include "chassis_command.hpp"
 #include "chassis_control.hpp"
+#include "chassis_odometry.hpp"
 #include "communication/robot_data.hpp"
 
 ChassisCmd chassis_cmd;
@@ -29,6 +32,8 @@ extern "C" void control_task(void *)
             chassis_odom.Update();
             odom_tick = now;
         }
+        // 完成一轮控制后喂狗，控制任务卡住时由 IWDG 复位。
+        HAL_IWDG_Refresh(&hiwdg);
         vTaskDelayUntil(&tick, pdMS_TO_TICKS(1));
     }
 }

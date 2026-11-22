@@ -726,6 +726,16 @@
               <FilePath>..\RtosTask\chassis_control.cpp</FilePath>
             </File>
             <File>
+              <FileName>chassis_command.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\RtosTask\chassis_command.cpp</FilePath>
+            </File>
+            <File>
+              <FileName>chassis_odometry.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\RtosTask\chassis_odometry.cpp</FilePath>
+            </File>
+            <File>
               <FileName>remote_task.cpp</FileName>
               <FileType>8</FileType>
               <FilePath>..\RtosTask\remote_task.cpp</FilePath>
@@ -738,7 +748,7 @@
             <File>
               <FileName>boards_communication.cpp</FileName>
               <FileType>8</FileType>
-              <FilePath>..\communication\boards_communication.cpp</FilePath>
+              <FilePath>..\..\shared\boards_communication.cpp</FilePath>
             </File>
             <File>
               <FileName>referee_communication.cpp</FileName>
@@ -755,6 +765,11 @@
         <Group>
           <GroupName>BSP</GroupName>
           <Files>
+            <File>
+              <FileName>DT7.cpp</FileName>
+              <FileType>8</FileType>
+              <FilePath>..\user\core\BSP\RemoteControl\DT7.cpp</FilePath>
+            </File>
             <File>
               <FileName>state_watch.cpp</FileName>
               <FileType>8</FileType>

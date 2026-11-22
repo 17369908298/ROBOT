@@ -39,7 +39,7 @@ struct ShooterConfig
         // 摩擦轮速度环 PID：输入 rpm，输出电流命令原始计数；积分限幅为 rpm·s。
         struct SpeedPid
         {
-            float kp{12.0f};
+            float kp{0.0f};
             float ki{0.0f};
             float kd{0.0f};
             float output_max{10000.0f};

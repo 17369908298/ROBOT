@@ -66,6 +66,8 @@ void ShooterCtrl::Update()
 
     if (!remote_allows_output(in.remote) || mode_ == OnmiShooterMode::STOP)
     {
+        sync_dial_ref(dial_angle_deg);
+        last_dial_fire_allowed_ = false;
         update_dial_recovery(in.dial, 0.0f, false, in.nowMs);
         reset_vis_state();
         heat_result_ = update_heat_control(false, 0.0f, in.left, in.right, in.referee, in.nowMs);
@@ -87,7 +89,7 @@ void ShooterCtrl::Update()
     {
 
         run_friction = vis_control_active(in.vision);
-        const auto state = update_vis_state(in.vision, friction_is_ready, in.nowMs);
+        const auto state = update_vis_state(in.vision, friction_is_ready, in.tracking_ready, in.nowMs);
         allow_dial_fire = allow_dial_fire && vis_dial_should_fire(state);
     }
     else
@@ -99,6 +101,7 @@ void ShooterCtrl::Update()
 
     if (!run_friction)
     {
+        update_dial_ref(mode_, in.remote, dial_angle_deg, false, 0.0f, in.nowMs);
         update_dial_recovery(in.dial, 0.0f, false, in.nowMs);
         heat_result_ = update_heat_control(false, 0.0f, in.left, in.right, in.referee, in.nowMs);
         if (friction_brake_needed)
@@ -127,7 +130,8 @@ void ShooterCtrl::Update()
 
     update_dial_recovery(in.dial, 0.0f, allow_dial_fire, in.nowMs);
 
-    publish_control(true, dial_online, in.left, in.right, in.third, in.dial);
+    const bool brake_dial = mode_ == OnmiShooterMode::VISION && !allow_dial_fire;
+    publish_control(true, dial_online, brake_dial, in.left, in.right, in.third, in.dial);
 }
 
 void ShooterCtrl::update_dial_ref(OnmiShooterMode mode, const Sentry::RemoteData &remote,
@@ -161,6 +165,16 @@ void ShooterCtrl::update_dial_ref(OnmiShooterMode mode, const Sentry::RemoteData
         {
             dial_ref_deg_ -= ShooterRuntime::shooter.dial.direction * angle_per_tick_deg(fire_rate_hz);
         }
+        else
+        {
+            // 撤销尚未执行的拨弹目标，恢复放行时不补走旧行程。
+            sync_dial_ref(dial_angle_deg);
+            if (last_dial_fire_allowed_)
+            {
+                dial_angle_pid_.reset();
+                dial_speed_pid_.reset();
+            }
+        }
         break;
     case OnmiShooterMode::STOP:
     case OnmiShooterMode::COUNT:
@@ -168,9 +182,10 @@ void ShooterCtrl::update_dial_ref(OnmiShooterMode mode, const Sentry::RemoteData
         break;
     }
     last_scroll_active_ = fire_active;
+    last_dial_fire_allowed_ = allow_fire;
 }
 
-void ShooterCtrl::publish_control(bool enable, bool enable_dial,
+void ShooterCtrl::publish_control(bool enable, bool enable_dial, bool brake_dial,
                                   const Sentry::MotorFeedback &fric_left,
                                   const Sentry::MotorFeedback &fric_right,
                                   const Sentry::MotorFeedback &fric_third,
@@ -203,8 +218,10 @@ void ShooterCtrl::publish_control(bool enable, bool enable_dial,
     float dial_ref_speed = 0.0f;
     if (enable_dial && dial_recovery_state_ == OnmiDialRecoveryState::NORMAL)
     {
-        dial_ref_speed = dial_angle_pid_.update(dial_ref_deg_, dial_output_angle_deg(dial),
-                                                ShooterRuntime::shooter.dt_sec);
+        // 禁止拨弹期间直接闭环制动至零速，避免位置环继续完成旧目标。
+        if (!brake_dial)
+            dial_ref_speed = dial_angle_pid_.update(dial_ref_deg_, dial_output_angle_deg(dial),
+                                                    ShooterRuntime::shooter.dt_sec);
         dial_current = dial_speed_pid_.update(dial_ref_speed, dial_output_speed_rpm(dial),
                                               ShooterRuntime::shooter.dt_sec);
     }
@@ -461,7 +478,8 @@ bool ShooterCtrl::update_base_fire_gate(std::uint32_t now_ms)
 }
 
 OnmiVisionShooterState ShooterCtrl::update_vis_state(
-    const App::Vision::VisionControlRequest &vision, bool friction_is_ready, std::uint32_t now_ms)
+    const App::Vision::VisionControlRequest &vision, bool friction_is_ready, bool tracking_ready,
+    std::uint32_t now_ms)
 {
     if (vis_lock_detected(vision))
         last_vis_lock_ms_ = now_ms;
@@ -472,7 +490,7 @@ OnmiVisionShooterState ShooterCtrl::update_vis_state(
     {
         if (!friction_is_ready)
             next = OnmiVisionShooterState::WAIT_READY;
-        else if (vis_fire_requested(vision))
+        else if ((!cfg::gimbal.vision.fire_gate.enabled || tracking_ready) && vis_fire_requested(vision))
             next = OnmiVisionShooterState::FIRE;
         else
             next = OnmiVisionShooterState::HOLD;
@@ -728,6 +746,7 @@ void ShooterCtrl::publish_zero_control()
 
 void ShooterCtrl::reset_pids()
 {
+    last_dial_fire_allowed_ = false;
     fric_left_pid_.reset();
     fric_right_pid_.reset();
     fric_third_pid_.reset();
@@ -740,7 +759,13 @@ ShooterCtrl::Inputs ShooterCtrl::readInputs()
     Inputs in{};
     in.nowMs = Sentry::Time::now_ms();
     in.remote = sentry_data.remote.read();
-    in.vision = sentry_data.vision.read();
+    // 云台先更新，发射控制复用其视觉帧，避免中断换帧后沿用旧目标的稳定资格。
+    const auto tracking = App::Onmi::visionTrackingStatus.read();
+    in.vision = tracking.vision;
+    in.tracking_ready = tracking.timestamp != 0U &&
+                        Sentry::Time::fresh(tracking.timestamp,
+                                            cfg::gimbal.vision.fire_gate.status_timeout_ms) &&
+                        tracking.valid && tracking.ready;
     in.referee = sentry_data.referee.read();
     in.left = sentry_data.fric_left_fb.read();
     in.right = sentry_data.fric_right_fb.read();

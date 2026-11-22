@@ -7,6 +7,7 @@
 #include "user/core/Alg/Omni/speed_planner.hpp"
 #include "user/core/Alg/Omni/vision_base_angle_hold.hpp"
 #include "user/core/Alg/Omni/yaw_auto_lqr_eso_ctrl.hpp"
+#include "user/core/Alg/Omni/position_tracking_gate.hpp"
 #include "RtosTask/robot_config.hpp"
 #include "communication/robot_data.hpp"
 #include "feeder_fsm/transform_fsm.hpp"
@@ -25,6 +26,29 @@ struct GimbalMotionStatus
 };
 
 extern Sentry::Snapshot<GimbalMotionStatus> gimbalMotionStatus;
+
+enum class VisionTrackingBlockReason : std::uint8_t
+{
+    NONE = 0U,
+    INACTIVE,
+    INVALID_INPUT,
+    TRANSITION,
+    POSITION_ERROR,
+    CONFIRMING,
+};
+
+/** @brief 位置门控与其实际使用的视觉帧，供同周期发射控制读取。 */
+struct VisionTrackingStatus
+{
+    App::Vision::VisionControlRequest vision{};
+    float yaw_error_rad{}, pitch_error_rad{};
+    ALG::Omni::PositionTrackingGate::State state{ALG::Omni::PositionTrackingGate::State::BLOCKED};
+    VisionTrackingBlockReason block_reason{VisionTrackingBlockReason::INACTIVE};
+    bool valid{}, ready{};
+    std::uint32_t stable_elapsed_ms{}, timestamp{};
+};
+
+extern Sentry::Snapshot<VisionTrackingStatus> visionTrackingStatus;
 
 } // namespace App::Onmi
 
@@ -52,6 +76,8 @@ class GimbalCtrl
     GimbalCtrl();
     /** @brief 按既有 VOFA 通道顺序导出控制数据，并返回通道数。 */
     unsigned GetVofaData(float *values, bool full) const;
+    /** @brief VOFA profile 4，导出本地位置门控的误差、状态及禁止原因。 */
+    unsigned GetTrackingVofaData(float *values) const;
 
     /** @brief 按 robot_config.hpp 中的配置初始化控制器。 */
     bool Init();
@@ -74,7 +100,7 @@ class GimbalCtrl
     static constexpr std::uint32_t SAFETY_YAW_FB_TIMEOUT_MS = 300U;
     static constexpr std::uint32_t SAFETY_VIS_TIMEOUT_MS = 100U;
     static constexpr std::uint32_t SAFETY_HOST_TIMEOUT_MS = 300U;
-    static constexpr std::uint32_t SAFETY_CHASSIS_LOCK_TIMEOUT_MS = 150U;
+    static constexpr std::uint32_t SAFETY_CHASSIS_LOCK_TIMEOUT_MS = 1500U;
     static_assert(cfg::gimbal.sentry.yaw.min_rad >= -SAFETY_YAW_MECH_LIMIT_RAD &&
                       cfg::gimbal.sentry.yaw.max_rad <= SAFETY_YAW_MECH_LIMIT_RAD,
                   "SENTRY yaw sweep must stay inside the fixed mechanical limit");
@@ -114,32 +140,26 @@ class GimbalCtrl
     /** @brief 统一换算电机反馈；无效转速写为 NaN 供安全检查使用。 */
     void update_motor_feedback(MotorState &motor, const Sentry::MotorFeedback &feedback);
 
-    /** @brief 变形对齐时单轴使用的角度环、规划器和参考角。 */
+    /** @brief 变形对齐时单轴使用的角度环和最终参考角。 */
     struct TransformAxis
     {
         ALG::Omni::TimePid angle_pid{};
-        ALG::Omni::SCurveVelocityPlanning planner{};
         float ref_rad{};
-    };
+        float integral_separation_rad{}, integral_reset_rad{};
 
-    /** @brief 单轴变形路径，封装起点、位移、已走路径和当前参考角。 */
-    struct AxisPath
-    {
-        float start_rad{}, delta_rad{}, path_rad{}, ref_rad{};
-
-        void reset(float angle_rad, float target_rad);
-        bool advance(ALG::Omni::SCurveVelocityPlanning &planner, float max_speed, float max_accel,
-                     float max_jerk, float dt_sec);
+        void update_integral_separation(float enter_rad, float reset_rad);
     };
 
     /** @brief 同步保存底盘、yaw、pitch 三轴的变形或恢复路径。 */
     struct AlignPath
     {
-        AxisPath base{};
-        AxisPath yaw{};
-        AxisPath pitch{};
+        ALG::Omni::RollPositionTrajectory base{};
+        ALG::Omni::RollPositionTrajectory yaw{};
+        ALG::Omni::RollPositionTrajectory pitch{};
         float roll_hold_rad{};
-        bool done{};
+
+        void advance();
+        bool done() const { return base.done() && yaw.done() && pitch.done(); }
     };
 
     // loop 保存可复位的运行量；PID 和规划器对象保留原配置。
@@ -255,6 +275,12 @@ class GimbalCtrl
             bool valid{};
         } alignment{};
     } vision_{};
+    struct Tracking
+    {
+        ALG::Omni::PositionTrackingGate gate{};
+        App::Onmi::VisionTrackingStatus status{};
+        std::uint32_t feedback_ms{};
+    } tracking_{};
     /** @brief 双 yaw 相对速度滤波及反作用力矩状态。 */
     struct Dual
     {
@@ -269,6 +295,8 @@ class GimbalCtrl
     struct Tf
     {
         TransformAxis base{};
+        float base_planned_rad{};
+        float roll_ref_rad{cfg::gimbal.roll.reference.transform_rad};
         struct Sync
         {
             float base_rad{}, yaw_rad{}, pitch_rad{};
@@ -321,10 +349,11 @@ class GimbalCtrl
     static bool active_control_mode(OnmiGimbalMode mode);
     static bool vis_lock_active(const App::Vision::VisionControlRequest &vision);
     bool update_vis_mode_debounce(bool raw_mode_active, std::uint32_t now_ms);
+    bool sentry_roll_angle_in_range() const;
     static OnmiGimbalMode select_mode(const Sentry::RemoteData &remote, bool main_imu_online,
                                       bool base_imu_online, bool motors_ready, bool fb_stale,
                                       bool vis_ref_locked, bool tf_requested,
-                                      bool tf_control_active, bool normal_roll_ready);
+                                      bool tf_control_active, bool sentry_roll_ready);
     static bool system_safe_for_external_output(const Sentry::RemoteData &remote,
                                                 bool main_imu_online, bool base_imu_online,
                                                 bool motors_ready, bool fb_stale);
@@ -361,18 +390,16 @@ class GimbalCtrl
     void set_roll_mode_ref(OnmiGimbalMode mode);
     void update_tf_fsm(bool tf_requested, bool normal_recovery_requested);
     void publish_motion_gate();
-    bool update_tf_control(const Sentry::MotorFeedback &base_fb,
-                           const Sentry::MotorFeedback &yaw_fb,
+    bool update_tf_control(const Sentry::MotorFeedback &yaw_fb,
                            const Sentry::MotorFeedback &pitch_fb);
-    void capture_tf_refs();
-    void update_tf_alignment_references();
+    bool capture_tf_refs();
     void capture_normal_sync_refs();
-    void capture_normal_recovery_refs();
-    void update_normal_recovery_references();
+    bool capture_normal_recovery_refs();
     bool tf_axes_reached() const;
     bool tf_roll_reached(float ref_rad) const;
     bool normal_roll_ref_reached() const;
     void reset_tf_ctrls();
+    void update_tf_tuning();
     bool set_refs_from_imus(const Sentry::IMUData &main_imu, const Sentry::IMUData &base_imu);
     bool sync_refs_from_imus(const Sentry::IMUData &main_imu, const Sentry::IMUData &base_imu);
     bool update_control(OnmiGimbalMode mode, const Sentry::IMUData &main_imu,
@@ -390,6 +417,7 @@ class GimbalCtrl
     void publish_heading(const Sentry::IMUData &base_imu);
     void publish_yaw_joint(const Sentry::MotorFeedback &base_fb);
     void publish_control(bool enable);
+    void publish_vision_tracking_status(bool output_enabled, std::uint32_t now_ms);
     void publish_stop();
 };
 

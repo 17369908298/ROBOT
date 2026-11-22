@@ -59,6 +59,7 @@ class ShooterCtrl
     struct Inputs
     {
         std::uint32_t nowMs{0U};
+        bool tracking_ready{false};
         Sentry::RemoteData remote{};
         App::Vision::VisionControlRequest vision{};
         Sentry::RefereeData referee{};
@@ -84,6 +85,7 @@ class ShooterCtrl
     bool ref_synced_{false};
     bool last_dial_fb_online_{false};
     bool last_scroll_active_{false};
+    bool last_dial_fire_allowed_{false};
     std::uint32_t scroll_active_since_ms_{0U};
     std::uint32_t last_vis_lock_ms_{0U};
     bool base_fire_gate_open_{false};
@@ -121,7 +123,8 @@ class ShooterCtrl
     bool update_base_fire_gate(std::uint32_t now_ms);
 
     OnmiVisionShooterState update_vis_state(const App::Vision::VisionControlRequest &vision,
-                                            bool friction_is_ready, std::uint32_t now_ms);
+                                            bool friction_is_ready, bool tracking_ready,
+                                            std::uint32_t now_ms);
     void reset_vis_state();
     bool update_dial_recovery(const Sentry::MotorFeedback &dial, float dial_current_cmd,
                               bool motion_requested, std::uint32_t now_ms);
@@ -134,7 +137,8 @@ class ShooterCtrl
     void update_dial_ref(OnmiShooterMode mode, const Sentry::RemoteData &remote,
                          float dial_angle_deg, bool allow_fire, float fire_rate_hz,
                          std::uint32_t now_ms);
-    void publish_control(bool enable, bool enable_dial, const Sentry::MotorFeedback &fric_left,
+    void publish_control(bool enable, bool enable_dial, bool brake_dial,
+                         const Sentry::MotorFeedback &fric_left,
                          const Sentry::MotorFeedback &fric_right,
                          const Sentry::MotorFeedback &fric_third,
                          const Sentry::MotorFeedback &dial);

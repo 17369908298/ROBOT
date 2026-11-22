@@ -9,10 +9,11 @@
 GimbalCtrl gimbal;
 ShooterCtrl shooter;
 Sentry::Snapshot<App::Onmi::GimbalMotionStatus> App::Onmi::gimbalMotionStatus;
+Sentry::Snapshot<App::Onmi::VisionTrackingStatus> App::Onmi::visionTrackingStatus;
 
-// VOFA：UART8/115200/JustFloat；0 拨盘 200 Hz，其余 50 Hz。
-// profile：0 拨盘、1 摩擦轮、2 云台、3 完整数据。
-volatile uint32_t vofa_profile = 3;
+// VOFA：UART8/115200/JustFloat；0、2、4 档 200 Hz，其余 50 Hz。
+// profile：0 拨盘、1 摩擦轮、2 云台、3 完整数据、4 位置跟踪门控。
+volatile uint32_t vofa_profile = 2;
 volatile bool vofa_enable = true;
 
 void vofa_sendN(const float *data, uint8_t count)
@@ -38,13 +39,18 @@ extern "C" void control_task(void *)
         const uint32_t now = HAL_GetTick();
         gimbal.Update();
         shooter.Update();
-        // 拨盘 8 通道单帧 36 字节，115200 波特率下传输约 3.13 ms。
-        const uint32_t vofa_period_ms = vofa_profile == 0U ? 5U : 20U;
+        const uint32_t profile = vofa_profile;
+        // 云台档 12 通道，含帧尾共 52 字节，在 115200/8N1 下约需 4.51 ms。
+        const uint32_t vofa_period_ms = (profile == 0U || profile == 2U || profile == 4U) ? 5U : 20U;
         if (vofa_enable && now - vofa_tick >= vofa_period_ms)
         {
             float values[29]{};
-            unsigned n = vofa_profile < 2 ? shooter.GetVofaData(values, vofa_profile == 1)
-                                          : gimbal.GetVofaData(values, vofa_profile == 3);
+            unsigned n;
+            if (profile == 4U)
+                n = gimbal.GetTrackingVofaData(values);
+            else
+                n = profile < 2U ? shooter.GetVofaData(values, profile == 1U)
+                                 : gimbal.GetVofaData(values, profile == 3U);
             vofa_sendN(values, uint8_t(n));
             vofa_tick = now;
         }

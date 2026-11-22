@@ -30,8 +30,8 @@ struct ChassisConfig
     // 底盘平移、旋转及轮端转速上限。
     struct Limits
     {
-        float max_planar_speed_mps{2.0f};
-        float max_angular_speed_radps{5.0f};
+        float max_planar_speed_mps{3.0f};
+        float max_angular_speed_radps{6.0f};
         float max_wheel_speed_rpm{420.0f};
     } limits{};
 
@@ -154,7 +154,7 @@ struct ChassisConfig
             bool absolute_speed_loss{true}; // 仅一次速度损耗项取绝对值。
         } model{};
         float fixed_w{0.0f}; // 额外固定功耗；为 0 时由模型常数项估计。
-        float fallback_w{50.0f}; // 裁判数据失效时使用的功率上限。
+        float fallback_w{100.0f}; // 裁判数据失效时使用的功率上限。
         float margin_w{5.0f}; // 功率限制预留裕量。
         std::uint32_t referee_timeout_ms{500U};
         float buffer_low_j{20.0f}; // 进入低缓冲降额的能量阈值。
@@ -167,7 +167,7 @@ struct ChassisConfig
     {
         std::uint32_t gimbal_yaw_timeout_ms{100U};
         std::uint32_t odometry_timeout_ms{100U};
-        float gimbal_yaw_zero_rad{4.688f};
+        float gimbal_yaw_zero_rad{4.845f};
         float gimbal_yaw_sign{1.0f};
         float gimbal_angle_comp_rad{0.0f};
         float gimbal_phase_comp_rad{0.0f};
@@ -177,13 +177,13 @@ struct ChassisConfig
     // 底盘跟随云台的航向误差死区、折返范围及角度环。
     struct FollowYaw
     {
-        float deadband_rad{0.03f};
+        float deadband_rad{0.05f};
         float half_range_rad{1.57079632679f};
 
         // 航向角度环 PID：输入 rad，输出 rad/s；积分限幅为 rad·s，输出默认限幅沿用底盘角速度上限。
         struct AnglePid
         {
-            float kp{3.0f};
+            float kp{4.0f};
             float ki{0.0f};
             float kd{0.0f};
             float output_max_radps{Limits{}.max_angular_speed_radps};
@@ -237,7 +237,7 @@ struct OdometryConfig
     // 反馈合理性检查：最大线速度、角速度及相邻航向跳变量。
     struct Limits
     {
-        float max_linear_speed_mps{3.0f};
+        float max_linear_speed_mps{5.0f};
         float max_angular_speed_radps{12.0f};
         float max_heading_jump_rad{1.0f};
     } limits{};

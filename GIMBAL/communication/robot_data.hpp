@@ -92,6 +92,7 @@ struct MotorFeedback
         return !is_online(timeout_ms);
     }
 };
+
 /** @brief 电机电流命令；current 为 BSP 对应驱动的原始命令量。 */
 struct MotorCommand
 {
@@ -543,7 +544,6 @@ struct RobotState
     Snapshot<Sentry::RefereeData> referee;
     Snapshot<Sentry::RefereeRadarTarget> radar;
     Snapshot<Sentry::MotorFeedback> base_fb;
-    Snapshot<Sentry::MotorCommand> base_cmd;
     Snapshot<Sentry::DMMotorStatus> base_status;
     Snapshot<Sentry::DMMITCommand> base_mit;
     Snapshot<Sentry::MotorFeedback> yaw_fb;
